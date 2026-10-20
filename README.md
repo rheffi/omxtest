@@ -17,7 +17,7 @@ git clone https://github.com/rheffi/omxtest.git ~/dev_ws/omxtest
 cd ~/dev_ws/omxtest
 ```
 
-**[설치 → 장비 확인 → 캘리 → 자세·그리퍼 기록 → 호버 → 집기·드랍 명령 안내](docs/omx_second_laptop_runbook.md)**를 순서대로 실행한다.
+[설치 → 장비 확인 → 캘리 → 자세·그리퍼 기록 → 호버 → 집기·드랍 명령 안내](docs/omx_second_laptop_runbook.md)를 순서대로 실행한다.
 `git clone`으로 받았다면 안내 1절의 ZIP 해제 대신 Git 경로를 사용한다.
 
 ## 포함된 파일
