@@ -1,0 +1,8 @@
+# Tested source laptop: Ubuntu, Python 3.12.3, CPU inference.
+# Install torch/torchvision first from the CPU wheel index as the runbook shows.
+numpy==2.5.2
+opencv-python==4.14.0.94
+dynamixel-sdk==4.1.0
+ultralytics==8.4.182
+torch==2.7.1+cpu
+torchvision==0.22.1+cpu

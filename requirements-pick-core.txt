@@ -1,0 +1,4 @@
+# Ubuntu Python 3.10-3.12; install in a separate virtual environment.
+numpy>=1.26,<3
+opencv-python>=4.10,<5
+dynamixel-sdk>=3.7,<5

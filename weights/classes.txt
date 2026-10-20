@@ -1,0 +1,10 @@
+jin_ramen
+shin_ramen
+seoul_milk
+banana_milk_bottle
+banana_milk_carton
+m_and_ms
+cheetos
+choco_pie
+shrimp_cracker
+rice_chip

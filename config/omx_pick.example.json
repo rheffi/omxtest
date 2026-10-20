@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "weights": null,
+  "device": "cpu",
+  "imgsz": 640,
+  "confidence": 0.6,
+  "stage_seconds": 2.5,
+  "regions_uv": [],
+  "gripper": {
+    "open_pulse": null,
+    "close_pulse": null,
+    "current_limit_raw": null,
+    "settle_s": 0.3
+  },
+  "classes": {
+    "REPLACE_WITH_EXACT_MODEL_CLASS_NAME": {
+      "calibration_file": null,
+      "grasp_fraction": [
+        0.5,
+        0.5
+      ],
+      "xy_offset_mm": [
+        0,
+        0
+      ],
+      "pick_z_mm": null,
+      "hover_clearance_mm": 50,
+      "approach_extra_mm": 40
+    }
+  },
+  "regions_source": "manual",
+  "unfold": {
+    "elbow_pulse": null,
+    "shoulder_pulse": null
+  },
+  "basket": {
+    "type": null,
+    "mount": "unspecified",
+    "shelf_to_basket_mm": 110,
+    "target_method": "saved_joint_poses",
+    "note": ""
+  },
+  "unfold_seconds": 3,
+  "gripper_seconds": 0.8,
+  "stage_pause_seconds": 0.1
+}
