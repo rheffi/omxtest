@@ -13,6 +13,7 @@ import sys
 import time
 
 from pick_core import ARM_IDS, MODELS, pulses, validate_gripper
+from omx_wrist import canonical_wrist, nearest_wrist
 
 
 class DynamixelBus:
@@ -107,7 +108,9 @@ class MotionController:
             if mode != (5 if motor_id == 16 else 4) or self.bus.read(motor_id, 20, 4) != 0:
                 raise RuntimeError(f"ID {motor_id}: 팔 mode=4 / 그리퍼 mode=5 / offset=0이 필요합니다 (현재 mode={mode})")
             present = self.bus.read(motor_id, 132, 4)
-            if not 0 <= present <= 4095:
+            if motor_id == 15:
+                canonical_wrist(present)
+            elif not 0 <= present <= 4095:
                 raise RuntimeError(f"ID {motor_id}: 현재 펄스가 0..4095 밖입니다")
         if 16 in self.ids:
             validate_gripper(self.cfg)
@@ -124,6 +127,10 @@ class MotionController:
 
     def ramp(self, targets, seconds=None):
         start = {i: self.bus.read(i, 132, 4) for i in targets}
+        if 15 in targets:
+            targets = dict(targets)
+            targets[15] = nearest_wrist(targets[15], start[15])
+            self.emit("wrist_goal", dict(present=start[15], goal=targets[15]))
         seconds = self.cfg["stage_seconds"] if seconds is None else seconds
         steps = max(1, math.ceil(seconds / 0.05))
         sent = start.copy()
@@ -161,6 +168,89 @@ class MotionController:
         self.ramp({16: target}, self.cfg.get("gripper_seconds", self.cfg["stage_seconds"]))
         if name not in ("OPEN", "RELEASE"):
             time.sleep(self.cfg["gripper"]["settle_s"])
+
+    def wait_arm_at(self, target, parking, *, stage="PARK", final=False):
+        """Require arrival and stable readings; elapsed ramp time is not arrival."""
+        tolerance = (parking["tolerance_pulses"] if final else
+                     parking.get("transit_tolerance_pulses", parking["tolerance_pulses"]))
+        goals = dict(zip(ARM_IDS, pulses(target)))
+        goals[15] = nearest_wrist(goals[15], self.bus.read(15, 132, 4))
+        self._wait_positions(goals, parking, stage=stage, tolerance=tolerance, final=final)
+
+    def _wait_positions(self, goals, parking, *, stage, tolerance, final):
+        """Read back positions/torque/errors for the motors being verified."""
+        deadline = time.monotonic() + parking["timeout_seconds"]
+        stable_since = None
+        previous = None
+        while True:
+            positions = {}
+            for motor_id in goals:
+                if self.bus.read(motor_id, 70, 1) != 0:
+                    raise RuntimeError(f"ID {motor_id}: 하드웨어 오류; 복귀 중단·토크 자동 해제 안 함")
+                if self.bus.read(motor_id, 64, 1) != 1:
+                    raise RuntimeError(f"ID {motor_id}: 복귀 중 토크 ON 미확인")
+                positions[motor_id] = self.bus.read(motor_id, 132, 4)
+            now = time.monotonic()
+            errors = {i: positions[i] - goals[i] for i in goals}
+            max_error = max(abs(error) for error in errors.values())
+            at_goal = max_error <= tolerance
+            stable = previous is not None and all(abs(positions[i] - previous[i]) <= 2 for i in goals)
+            if at_goal and stable:
+                if stable_since is None:
+                    stable_since = now
+                if now - stable_since >= parking["settle_seconds"]:
+                    self.emit("park_arrival", dict(stage=stage, goals=goals, positions=positions,
+                                                   errors=errors, tolerance_pulses=tolerance, final=final))
+                    print(f"[PARK ARRIVED] {stage}: 최대 오차={max_error}펄스 / 기준={tolerance}펄스; 정지 확인", flush=True)
+                    return
+            else:
+                stable_since = None
+            if now >= deadline:
+                raise RuntimeError(f"{stage} 도착/정지 미확인: 기준={tolerance}펄스, "
+                                   f"오차(현재-목표)={errors}, 목표={goals}, 현재={positions}; "
+                                   "토크 자동 해제 안 함. 실제 간섭·받침을 확인하세요")
+            previous = positions
+            time.sleep(0.1)
+
+    def park(self, parking):
+        """Return, verify empty-gripper closure, then disable all torque."""
+        try:
+            grip = validate_gripper(self.cfg)
+            if 16 not in self.ids:
+                raise ValueError("복귀 후 닫힘을 위해 그리퍼 제어 준비가 필요합니다")
+            # All six motors must be available before moving the parking route.
+            for motor_id, expected in zip((*ARM_IDS, 16), (*MODELS, 1200)):
+                if self.bus.ping(motor_id) != expected:
+                    raise RuntimeError(f"ID {motor_id}: 예상 모터 모델이 아닙니다")
+                if self.bus.read(motor_id, 70, 1) != 0:
+                    raise RuntimeError(f"ID {motor_id}: 하드웨어 오류; 복귀 시작 안 함")
+            for index, pose in enumerate(parking["route"]):
+                self.emit("park_stage_start", pose)
+                print(f"[PARK ARM] {pose['name']}", flush=True)
+                self.ramp(dict(zip(ARM_IDS, pulses(pose["target"]))), parking["seconds"])
+                self.wait_arm_at(pose["target"], parking, stage=pose["name"],
+                                 final=index == len(parking["route"]) - 1)
+                self.emit("park_stage_done", pose)
+            closing = dict(name="PARK_CLOSE", target=grip["close_pulse"],
+                           current_limit_raw=grip["current_limit_raw"])
+            self.emit("park_gripper_start", closing)
+            self.gripper("PARK_CLOSE", grip["close_pulse"])
+            self._wait_positions({16: grip["close_pulse"]}, parking,
+                                 stage="PARK_CLOSE", tolerance=20, final=True)
+            self.emit("park_gripper_done", closing)
+            # Closing near a support must not displace the arm before release.
+            self.wait_arm_at(parking["route"][-1]["target"], parking,
+                             stage="PARK_REST_AFTER_CLOSE", final=True)
+        except BaseException:
+            self.hold()
+            raise
+        # Do not hold or re-enable motors after a partial torque-off failure.
+        # The operator must see the readback for every ID and support the arm.
+        print("[PARK] 마지막 자세·그리퍼 닫힘·정지 확인. 팔·그리퍼 토크 해제.", flush=True)
+        results = torque_off(self.bus)
+        self.emit("park_torque_off", results)
+        if not all(row["confirmed"] for row in results.values()):
+            raise RuntimeError(f"토크 해제 일부 미확인. 팔을 받치고 상태를 확인하세요: {results}")
 
     def hold(self):
         if not self.touched:

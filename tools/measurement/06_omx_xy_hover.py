@@ -21,6 +21,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from omx_wrist import canonical_wrist, nearest_wrist
 
 from omx_arm_config import (add_arm_argument, load_arm_profile, require_camera,
                             require_explicit_arm, require_identity)
@@ -158,14 +159,27 @@ def make_plan(data, uv, start):
     approach[2] += APPROACH_ABOVE_HOVER_MM
     if not np.isfinite(hover).all():
         raise ValueError("호버 좌표가 유효하지 않습니다")
-    goal_approach = solve_pose(fk, approach, "상부 접근점")
-    goal_hover = solve_pose(fk, hover, "호버점")
+    if start is None:
+        goal_approach = solve_pose(fk, approach, "상부 접근점")
+        goal_hover = solve_pose(fk, hover, "호버점")
+    else:
+        from omx_tool_direction import direction_solver
+        solve = direction_solver(fk, start, start)
+        goal_approach = np.asarray(solve(approach), dtype=int)
+        goal_hover = np.asarray(solve(hover), dtype=int)
     plan = {"uv": uv, "hover_mm": hover, "approach_mm": approach,
             "approach_pulses": goal_approach, "hover_pulses": goal_hover,
             "start_pulses": start}
     if start is not None:
         start_position, _ = fk.forward(pulse_to_q(start))
         plan["start_mm"] = start_position * 1000
+        from omx_tool_direction import heading, wrist_report
+        plan["tool_heading_deg"] = math.degrees(heading(fk, start))
+        plan["wrist_path"] = wrist_report(fk, [
+            dict(name=name, kind="arm", target=target)
+            for name, target in (("HIGH", start), ("APPROACH", goal_approach),
+                                 ("HOVER", goal_hover), ("RETREAT", goal_approach),
+                                 ("RETURN_HIGH", start))])
     return plan
 
 
@@ -187,6 +201,8 @@ def show_plan(data, plan, pose_name, from_folded=False, stage_seconds=DEFAULT_ST
         print(f"saved_high_pose={pose_name}, pulses={plan['start_pulses'].tolist()}")
         print(f"saved_start_model_mm={plan['start_mm'].round(1).tolist()}")
         print(f"candidate_approach_pulses={plan['approach_pulses'].tolist()}")
+        print(f"[WRIST] HIGH에서 기록한 집게 방향 유지: {plan['tool_heading_deg']:.1f} deg")
+        print("[WRIST] " + " -> ".join(f"{r['stage']}:{r['id15_unwrapped_pulse']}" for r in plan["wrist_path"]))
         if from_folded:
             print(f"unfold_waypoints: ID 13={UNFOLD_ELBOW_PULSES}, ID 12={UNFOLD_SHOULDER_PULSES}")
             print("stage_order=ID 13 -> ID 12 -> HIGH -> APPROACH -> HOVER")
@@ -270,6 +286,8 @@ def read_motor_state(packet, port):
         error_bits = sdk_read(packet, port, motor_id, 70, 1, "hardware error")
         goal = sdk_read(packet, port, motor_id, 116, 4, "goal")
         position = sdk_read(packet, port, motor_id, 132, 4, "present")
+        if motor_id == 15:
+            canonical_wrist(position)
         if mode != 4 or offset != 0 or error_bits != 0 or torque not in (0, 1):
             raise RuntimeError(f"ID {motor_id}: mode={mode}, offset={offset}, torque={torque}, error={error_bits}")
         positions.append(position)
@@ -287,6 +305,9 @@ def send_stage(packet, port, label, targets, stage_seconds=DEFAULT_STAGE_SECONDS
     present = read_positions(packet, port)
     indices = {motor_id: IDS.index(motor_id) for motor_id in targets}
     start = {motor_id: int(present[index]) for motor_id, index in indices.items()}
+    if 15 in targets:
+        targets = dict(targets)
+        targets[15] = nearest_wrist(targets[15], start[15])
     steps = max(1, int(math.ceil(stage_seconds / GOAL_UPDATE_PERIOD_S)))
     period = stage_seconds / steps
     sent = start.copy()

@@ -17,6 +17,7 @@ from pick_core import (ROOT, ARM_IDS, MODELS, read_json, project_path, number,
 sys.path.insert(0, str(ROOT / "tools" / "measurement"))
 from omx_arm_config import load_arm_profile, require_camera, require_identity
 from omx_workspace import validate_regions
+from omx_wrist import canonical_wrist
 
 
 KNOWN_UNFOLD_SERIAL = "usb-ROBOTIS_OpenRB-150_1B8E02E050323952582E3120FF071F2E-if00"
@@ -63,8 +64,11 @@ def read_snapshot(profile):
         if (row["model"] != expected_model or row["mode"] != (5 if motor_id == 16 else 4)
                 or row["homing_offset"] != 0 or row["hardware_error"]):
             raise ValueError(f"ID {motor_id}: 모델·동작모드·영점·오류 상태를 확인하세요")
-        integer(row["position"], f"ID {motor_id} position", 0, 4095)
-    pulses = [row["position"] for row in rows[:5]]
+        if motor_id == 15:
+            canonical_wrist(row["position"])
+        else:
+            integer(row["position"], f"ID {motor_id} position", 0, 4095)
+    pulses = [canonical_wrist(row["position"]) if row["id"] == 15 else row["position"] for row in rows[:5]]
     q = (np.asarray(pulses) - 2048) * (2 * math.pi / 4096)
     xyz, orientation = legacy("02_omx_xyz_offline.py", "pick_setup_fk").forward(q)
     return {"recorded_at": datetime.now().astimezone().isoformat(), "motors": rows,
@@ -206,6 +210,7 @@ def make_config(profile, calibration, weights, label, values):
                      "mount": values["mount"], "note": values["note"], "target_method": "saved_joint_poses"}
     if values.get("setup_measurements"):
         cfg["setup_measurements"] = values["setup_measurements"]
+        rule["grasp_reference_pulses"] = list(values["setup_measurements"]["pick_arm_pulses"])
     return cfg
 
 

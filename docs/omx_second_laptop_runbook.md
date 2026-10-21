@@ -343,6 +343,7 @@ env -u PYTHONPATH -u PYTHONHOME .venv-pick/bin/python -B tools/picking/omx_pick_
 5. 실제 핑키프로 바구니는 `1`, 임시 바구니는 `2` 선택 → 위치 메모 → `SAVE`.
 
 설정 도구 자체는 움직이지 않는다. 다른 제어 프로그램으로 자세를 맞췄다면 읽기 전에 그 프로그램을 종료한다.
+수정본은 이때 기록한 **집게 방향도** 접근·호버·집기·상승에 반영한다. 기존 설정의 `setup_measurements.pick_arm_pulses`도 자동으로 읽으므로 방향 기록이 남아 있다면 다시 설정하지 않는다.
 그리퍼 전류는 닫힘 기록에서 읽은 Goal Current를 재사용한다. 첫 번째 팔의 닫힘값 **2136**과 전류값을 그대로 복사하지 않는다.
 
 ```bash
@@ -368,6 +369,18 @@ env -u PYTHONPATH -u PYTHONHOME .venv-pick/bin/python -B tools/picking/omx_pick.
 ```
 
 ## 6. YOLO 호버 → 집기·드랍
+
+### 손목 회전 수정본: 먼저 계산 확인
+
+카메라·모터를 열지 않고 기록한 집기점에서 경로를 계산한다. `wrist_path`의 `id15_unwrapped_pulse`와 `delta_deg`를 확인한다. 실제 YOLO 목표·도착·충돌을 검증하는 명령은 아니다.
+
+```bash
+env -u PYTHONPATH -u PYTHONHOME .venv-pick/bin/python -B tools/picking/omx_pick.py --wrist-preview
+```
+
+손목(ID 15)이 0/4095 경계를 넘을 때는 현재 위치와 가까운 동등 목표를 사용한다. 예를 들어 기록값 `26 → 4069`는 실제 전송 목표 `26 → -27`이 되어 약 4.7도만 움직인다. 음수 목표는 이미 요구하는 모드 4의 확장 위치값이며 모터 모드를 새로 바꾸지 않는다. 다른 팔 관절에 이 처리를 적용하지 않는다.
+
+HIGH·드랍은 기록한 자세를 사용하므로 그 구간의 집게 방향은 기록에 따라 달라질 수 있다. 집기 구간의 방향 유지와 저장 자세 전환을 구분해서 확인한다. 자세를 다시 기록해야 한다면 실물 정렬 후 해당 자세만 교체하며 캘리 행렬을 다시 계산하지 않는다. 자세 재기록과 상세 설명은 `docs/omx_wrist_direction_fix.md`를 참고한다.
 
 팔이 HIGH 자세인 상태에서 시작한다. 아래 호버는 상품 위로 이동했다가 HIGH로 복귀하며 그리퍼는 제어하지 않는다.
 
@@ -395,6 +408,18 @@ env -u PYTHONPATH -u PYTHONHOME .venv-pick/bin/python -B tools/picking/omx_pick_
 5mm 위의 낮은 호버 위치를 그대로 집기 Z로 저장하지 않는다. 저장 후 자동 복귀는 없다.
 
 ### 토크 해제
+
+집기 후 **초기 자세 복귀 → 그리퍼 닫힘 → 전체 토크 해제**까지 실행하려면
+[복귀 자세 기록·시험 안내](omx_parking.md)에 따라 경유 자세와 초기 자세를 한 번 기록한 뒤 아래 명령을 사용한다.
+2026-10-21 현재 노트북·장비에서 정상 동작을 확인했다. `MOVE`를 입력하면 전체 순서를 진행한다.
+
+```bash
+env -u PYTHONPATH -u PYTHONHOME .venv-pick/bin/python -B tools/picking/omx_pick.py --live --park-after --park-transit-tolerance 50
+```
+
+HIGH·중간 경유점의 허용 오차는 50펄스이며 최종 팔 자세와 그리퍼 닫힘 기준은 20펄스를 유지한다.
+복귀만 실행하려면 `--park --live --park-transit-tolerance 50`을 사용한다.
+그리퍼는 저장한 닫힘 펄스·전류 설정으로 닫은 뒤 토크를 해제한다.
 
 팔·상품을 받친 상태에서 실행하고 `OFF`를 입력한다. 다음 수동 자세 조절 전에 사용한다.
 
@@ -433,7 +458,7 @@ env -u PYTHONPATH -u PYTHONHOME .venv-pick/bin/python -B tools/picking/omx_pick.
 
 ## 전달본 구성
 
-- `tools/`: 현재 실행 코드.
+- `tools/`: 손목 방향 유지·경계 통과 보상을 포함한 현재 실행 코드.
 - `weights/best.pt`, `weights/classes.txt`: 기존 학습 결과와 클래스 목록.
 - `requirements-transfer.txt`: 현재 성공한 주요 패키지 버전.
 - `config/omx_pick.example.json`: 새 설정 생성용 예제.

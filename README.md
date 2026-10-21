@@ -70,3 +70,25 @@ git pull --ff-only
 ```bash
 env -u PYTHONPATH -u PYTHONHOME .venv-pick/bin/python -B tools/picking/omx_pick.py --demo
 ```
+
+## 초기 자세 복귀·토크 해제
+
+[초기 자세와 경유 자세를 기록하고 빈 그리퍼로 복귀 시험](docs/omx_parking.md)한 뒤 아래 명령을 실행한다.
+2026-10-21 현재 노트북·장비에서 정상 동작을 확인한 명령이다.
+
+```bash
+env -u PYTHONPATH -u PYTHONHOME .venv-pick/bin/python -B tools/picking/omx_pick.py --live --park-after --park-transit-tolerance 50
+```
+
+집기 → 바구니 드랍 → HIGH → 초기 자세 복귀 → 그리퍼 닫힘 확인 → 팔·그리퍼 토크 OFF 순서다.
+`--park-transit-tolerance 50`은 HIGH·중간 경유점에 적용되며 최종 팔 자세와 그리퍼 닫힘 기준은 20펄스다.
+동일한 중간 허용 오차로 복귀만 실행하려면 `--park --live --park-transit-tolerance 50`을 사용한다.
+현재 코드는 기록한 집기 방향 유지와 손목 0/4095 경계의 짧은 회전도 반영한다. [손목 방향 수정 안내](docs/omx_wrist_direction_fix.md)를 참고한다.
+
+## 오프라인 회귀 테스트
+
+가상 모터와 `tests/fixtures/`의 가상 데이터로 손목 경로·초기 자세 복귀·그리퍼 닫힘·토크 해제 순서를 검사한다. 현장 캘리브레이션·카메라·모터 연결은 필요 없다. 테스트 데이터는 실물 제어에 사용하지 않는다.
+
+```bash
+env -u PYTHONPATH -u PYTHONHOME .venv-pick/bin/python -B -m unittest discover -s tests -v
+```

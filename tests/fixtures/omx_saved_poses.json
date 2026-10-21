@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "robot": "ROBOTIS OMX-AI follower OMX-F",
+  "motor_ids": [
+    11,
+    12,
+    13,
+    14,
+    15
+  ],
+  "arm": "single",
+  "serial_port": "/dev/omx-test-only",
+  "note": "SYNTHETIC TEST DATA ONLY; never send these values to hardware.",
+  "poses": {
+    "hover_high": {
+      "motor_ids": [
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "motor_models": [
+        1060,
+        1060,
+        1060,
+        1200,
+        1200
+      ],
+      "operating_modes": [
+        4,
+        4,
+        4,
+        4,
+        4
+      ],
+      "homing_offsets": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "raw_pulses": [
+        2504,
+        1592,
+        2635,
+        2942,
+        2341
+      ]
+    },
+    "drop_approach": {
+      "motor_ids": [
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "motor_models": [
+        1060,
+        1060,
+        1060,
+        1200,
+        1200
+      ],
+      "operating_modes": [
+        4,
+        4,
+        4,
+        4,
+        4
+      ],
+      "homing_offsets": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "raw_pulses": [
+        2570,
+        1787,
+        2635,
+        2746,
+        2309
+      ]
+    },
+    "drop_release": {
+      "motor_ids": [
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "motor_models": [
+        1060,
+        1060,
+        1060,
+        1200,
+        1200
+      ],
+      "operating_modes": [
+        4,
+        4,
+        4,
+        4,
+        4
+      ],
+      "homing_offsets": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "raw_pulses": [
+        2570,
+        1983,
+        2635,
+        2550,
+        2309
+      ]
+    }
+  }
+}

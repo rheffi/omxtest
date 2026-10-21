@@ -14,7 +14,7 @@ from pathlib import Path
 
 from pick_core import (ROOT, build_plan, choose, decode_detections, demo, execute,
                        get_rule, load_config, number, project_path, read_json,
-                       validate_gripper, build_drop_plan)
+                       validate_gripper, build_drop_plan, pulses)
 
 MEASUREMENT = ROOT / "tools" / "measurement"
 sys.path.insert(0, str(MEASUREMENT))
@@ -70,17 +70,79 @@ def saved_for(profile, hover_only):
     return {name: recorder.load_pose(name, profile)["raw_pulses"] for name in names}
 
 
-def solver_for():
-    import numpy as np
-    fk = legacy("02_omx_xyz_offline.py", "pick_fk")
+def parking_for(args, profile):
+    """Load the entire taught route before any camera/motor activity."""
+    recorder = legacy("07_omx_pose_recorder.py", "pick_park_recorder")
+    names = args.park_pose or ["park_approach", "park_rest"]
+    registry = recorder.load_registry(profile)
+    route = []
+    for name in names:
+        recorder.validate_name(name)
+        if name not in registry["poses"]:
+            raise ValueError(f"복귀 자세 '{name}' 기록이 없습니다. "
+                             "07_omx_pose_recorder.py --save NAME으로 경유 자세와 받침 위 초기 자세를 먼저 기록하세요")
+        route.append(dict(name=name, target=list(pulses(registry["poses"][name]["raw_pulses"]))))
+    return dict(route=route, seconds=args.park_seconds,
+                tolerance_pulses=20, transit_tolerance_pulses=args.park_transit_tolerance,
+                timeout_seconds=10, settle_seconds=0.5,
+                torque_off_scope="all")
 
-    def solve(xyz):
-        result = fk.solve(np.asarray(xyz, dtype=float) / 1000, True)
-        if not result.feasible or result.position_error_m > 0.002 or result.down_error_deg > 5:
-            raise ValueError(f"도달 불가능한 모델 XYZ/아래 방향: {xyz}")
-        raw = np.rint(2048 + np.asarray(result.q) * 4096 / (2 * math.pi)).astype(int)
-        return [int(v) for v in raw]
-    return solve
+
+def print_parking(parking):
+    print("[PARK] " + " -> ".join(p["name"] for p in parking["route"]) +
+          f"; 구간당 {parking['seconds']}초; 초기 자세 도착 -> 그리퍼 닫힘 확인 -> 팔·그리퍼 토크 OFF", flush=True)
+    print(f"[PARK] 도착 오차 기준: HIGH·경유={parking.get('transit_tolerance_pulses', 20)}펄스, "
+          f"최종={parking['tolerance_pulses']}펄스; 0.5초 정지 확인", flush=True)
+    print("[PARK] 빈 그리퍼로 경로를 확인하세요. 마지막 자세는 토크 없이 받침에 놓일 자세여야 합니다.", flush=True)
+
+
+def parking_with_gripper(parking, cfg):
+    """Capture the taught closing position/current before connecting hardware."""
+    grip = dict(validate_gripper(cfg))
+    seconds = number(cfg.get("gripper_seconds", cfg.get("stage_seconds", 1.0)), "gripper_seconds", 0)
+    if seconds == 0:
+        raise ValueError("gripper_seconds는 양수여야 합니다")
+    return dict(parking, gripper=grip, gripper_seconds=seconds, gripper_action="CLOSE")
+
+
+def reference_for(cfg, label, profile):
+    """Prefer per-class data; migrate old recordings in memory without writes."""
+    rule = get_rule(cfg, label)
+    if rule.get("grasp_reference_pulses") is not None:
+        return list(pulses(rule["grasp_reference_pulses"]))
+    # Old setup wrote a single class and retained its pick pose at top level.
+    recorded = (cfg.get("setup_measurements") or {}).get("pick_arm_pulses")
+    if recorded is not None and len(cfg["classes"]) == 1:
+        return list(pulses(recorded))
+    path = profile.calibration.parent / "omx_pick_setup_samples.json"
+    if path.exists():
+        from omx_arm_config import require_identity
+        samples = read_json(path)
+        require_identity(samples, profile)
+        recorded = samples.get("classes", {}).get(label, {}).get("pick", {}).get("arm_pulses")
+        if recorded is not None:
+            return list(pulses(recorded))
+    raise ValueError("상품의 집기 방향 기록이 없습니다. omx_pick_setup.py --replace --rerecord로 다시 기록하세요")
+
+
+def solver_for(reference_pulses, start_pulses=None):
+    from omx_tool_direction import direction_solver
+    fk = legacy("02_omx_xyz_offline.py", "pick_fk")
+    return direction_solver(fk, reference_pulses, start_pulses)
+
+
+def add_wrist_report(plan, reference):
+    from omx_tool_direction import heading, wrist_report
+    fk = legacy("02_omx_xyz_offline.py", "pick_wrist_report_fk")
+    plan["grasp_direction"] = dict(reference_pulses=reference,
+                                   model_tool_heading_deg=math.degrees(heading(fk, reference)))
+    plan["wrist_path"] = wrist_report(fk, plan["stages"])
+
+
+def print_wrist_report(plan):
+    print(f"[WRIST] 기록한 집기 방향={plan['grasp_direction']['model_tool_heading_deg']:.1f} deg; 접근·집기·상승에서 유지")
+    print("[WRIST] " + " -> ".join(f"{r['stage']}:{r['id15_unwrapped_pulse']}" for r in plan["wrist_path"]))
+    print("[WRIST] HIGH·드랍은 저장 자세를 사용합니다. 그 구간의 방향 전환도 빈 집게로 확인하세요.")
 
 
 def print_json(value):
@@ -131,22 +193,54 @@ def arguments(argv=None):
     source.add_argument("--image", type=Path, help="정지 이미지: 실물 이동 불가")
     source.add_argument("--detections", type=Path, help="검출 JSON: 실물 이동 불가")
     source.add_argument("--status", action="store_true", help="설정과 준비 상태 확인; 장비 연결 없음")
+    source.add_argument("--wrist-preview", action="store_true", help="기록한 집기점에서 손목 경로 계산; 카메라·모터 연결 없음")
     source.add_argument("--torque-off", action="store_true", help="OFF 확인 후 토크만 해제; 카메라/집기설정 불필요")
     source.add_argument("--drop-test", action="store_true", help="카메라 없이 고정 드랍 경로 시험; 그리퍼 제어 없음")
+    source.add_argument("--park", action="store_true", help="기록한 경유·초기 자세 복귀 후 토크 해제 (실행: --live)")
+    parser.add_argument("--park-after", action="store_true", help="집기/호버 성공 후 초기 자세 복귀·토크 해제")
+    parser.add_argument("--park-pose", action="append", metavar="NAME",
+                        help="복귀 자세 이름을 실행 순서대로 반복 지정 (기본: park_approach, park_rest)")
+    parser.add_argument("--park-seconds", type=float, default=4.0, help="복귀 구간당 이동 시간, 1..60초 (기본 4)")
+    parser.add_argument("--park-transit-tolerance", type=int, default=20, metavar="PULSES",
+                        help="HIGH·중간 경유 자세 도착 허용 오차 1..100펄스 (기본 20); 최종 자세는 20 고정")
     parser.add_argument("--torque-scope", choices=("all", "arm", "gripper"), default="all")
     parser.add_argument("--from-folded", action="store_true", help="설정의 ID13→ID12 중간값으로 펼친 후 HIGH")
     source.add_argument("--inspect", action="store_true", help="모터 PING/READ와 후보 FK 출력")
     source.add_argument("--gripper-test", choices=("open", "close"), help="그리퍼만 단독 시험; --live 필요")
     parser.add_argument("--detect-only", action="store_true", help="보정 없이 검출 목록만 출력")
     parser.add_argument("--hover", action="store_true", help="그리퍼/집기 없이 높은 호버와 복귀만")
-    parser.add_argument("--live", action="store_true", help="현재 카메라 인식 + MOVE 확인 후 1회 실물 실행")
+    parser.add_argument("--live", action="store_true", help="1회 실물 실행 (집기: MOVE, 초기 자세 복귀: PARK 확인)")
     parser.add_argument("--stage-seconds", type=float, help="이번 실행의 일반 팔 이동 시간만 변경 (초)")
     parser.add_argument("--target-index", type=int, default=0, help="허용된 같은 클래스 검출을 신뢰도 순으로 선택 (0부터)")
     parser.add_argument("--show", action="store_true", help="검출 정지 화면 표시; 키 입력으로 닫기")
     parser.add_argument("--output", type=Path, help="새 JSON 출력 또는 --live JSONL 기록 경로 (덮어쓰기 금지)")
     args = parser.parse_args(argv)
+    parking = args.park or args.park_after
+    if not math.isfinite(args.park_seconds) or not 1 <= args.park_seconds <= 60:
+        parser.error("park-seconds는 1..60초입니다")
+    if not 1 <= args.park_transit_tolerance <= 100:
+        parser.error("park-transit-tolerance는 1..100펄스입니다")
+    if not parking and (args.park_pose is not None or args.park_seconds != 4.0 or args.park_transit_tolerance != 20):
+        parser.error("복귀 옵션에는 --park 또는 --park-after가 필요합니다")
+    if parking and args.torque_scope != "all":
+        parser.error("초기 자세 복귀는 마지막에 팔·그리퍼 전체 토크를 해제합니다. --torque-scope 부분 지정은 지원하지 않습니다")
+    if args.park and any((args.park_after, args.label, args.weights, args.detect_only, args.show,
+                          args.hover, args.from_folded, args.gripper_test, args.stage_seconds is not None)):
+        parser.error("--park에는 --live, --park-pose, --park-seconds, --output만 함께 쓰세요")
+    if args.park_after and any((args.demo, args.image, args.detections, args.status, args.wrist_preview,
+                                args.torque_off, args.drop_test, args.inspect, args.gripper_test,
+                                args.detect_only)):
+        parser.error("--park-after는 현재 카메라의 집기/호버 경로와 사용하세요")
+    if args.park_pose is not None and len(args.park_pose) < 2:
+        parser.error("--park-pose는 경유 자세와 마지막 받침 위 초기 자세를 포함해 2개 이상 지정하세요")
+    if args.park:
+        return args
     if args.target_index < 0:
         parser.error("target-index는 0 이상입니다")
+    if args.wrist_preview:
+        if any((args.live, args.weights, args.detect_only, args.show, args.hover, args.from_folded)):
+            parser.error("--wrist-preview는 --config, --class, --output과 사용하세요")
+        return args
     if args.demo:
         if any((args.live, args.arm, args.label, args.weights, args.detect_only, args.show, args.from_folded)):
             parser.error("--demo에는 --hover와 --output만 함께 쓰세요")
@@ -217,7 +311,9 @@ def run_gripper_test(args, profile, cfg):
             print("[HOLD] 그리퍼 토크 유지. 필요하면 기존 수동 조작 방법으로 해제하세요.")
 
 
-def run_pipeline(args, profile, cfg):
+def run_pipeline(args, profile, cfg, parking=None):
+    if parking is not None:
+        parking = parking_with_gripper(parking, cfg)
     from pick_vision import Camera, Detector, show, capture_target
     with ExitStack() as stack:
         if not args.detect_only:
@@ -268,12 +364,20 @@ def run_pipeline(args, profile, cfg):
         if (width, height) != (calibration["width"], calibration["height"]):
             raise ValueError("입력 이미지/검출 JSON의 해상도가 선택한 팔의 보정과 다릅니다")
         saved = saved_for(profile, args.hover)
+        reference = reference_for(cfg, target.label, profile)
         print("[PLAN] IK 계산 중. 모터에는 연결하지 않습니다.", flush=True)
-        plan = build_plan(cfg, calibration, target, saved, solver_for(), hover_only=args.hover, from_folded=args.from_folded)
+        plan = build_plan(cfg, calibration, target, saved, solver_for(reference, saved["hover_high"]),
+                          hover_only=args.hover, from_folded=args.from_folded)
+        add_wrist_report(plan, reference)
         plan.update(arm=profile.name, serial_port=str(profile.port), calibration_file=str(calibration_path),
                     calibration_check=calibration_report(calibration, cfg))
+        if parking is not None:
+            plan["parking"] = parking
         if args.live:
             print(f"[TARGET] {target.label}: XY={plan['pick_model_xyz_mm'][:2]}")
+            print_wrist_report(plan)
+            if parking is not None:
+                print_parking(parking)
         else:
             print_json(plan)
         if args.show:
@@ -286,16 +390,31 @@ def run_pipeline(args, profile, cfg):
         bus = stack.enter_context(DynamixelBus(profile.port))
         driver = MotionController(bus, cfg, journal.emit)
         journal.emit("plan", {"plan": plan, "config": cfg})
-        driver.prepare(saved["hover_high"], use_gripper=not args.hover, from_folded=args.from_folded)
+        driver.prepare(saved["hover_high"], use_gripper=not args.hover or parking is not None,
+                       from_folded=args.from_folded)
         if input(f"{profile.name}: 주변과 경로를 확인하고 MOVE 입력: ").strip() != "MOVE":
             journal.emit("cancelled", {})
             print("[CANCELLED] 모터 목표·토크를 변경하지 않았습니다.")
             return
         try:
-            driver.enable()
+            try:
+                driver.enable()
+            except BaseException:
+                driver.hold()
+                raise
             execute(plan, driver, emit=journal.emit)
+            if parking is not None:
+                try:
+                    driver.wait_arm_at(saved["hover_high"], parking, stage="RETURN_HIGH")
+                except BaseException:
+                    driver.hold()
+                    raise
+                driver.park(parking)
             journal.emit("completed", {"command_sequence": "SENT", "physical_success": "OPERATOR_VERIFY"})
-            print("[DONE] 목표 전송 순서 종료. 실제 도착·집기·하역 결과를 확인하세요. 토크는 유지합니다.")
+            if parking is not None:
+                print("[DONE] 초기 자세 도착·그리퍼 닫힘·팔·그리퍼 토크 OFF 확인. 실제 적재 결과를 확인하세요.")
+            else:
+                print("[DONE] 목표 전송 순서 종료. 실제 도착·집기·하역 결과를 확인하세요. 토크는 유지합니다.")
         except BaseException as exc:
             journal.emit("failed", {"error": str(exc)})
             raise
@@ -325,6 +444,7 @@ def run_status(args, profile):
         pending.append("집기 클래스 설정 필요")
     for label, rule in classes.items():
         try:
+            reference_for(cfg, label, profile)
             cal, _ = calibration_for(profile, rule, cfg)
             calibration_checks[label] = calibration_report(cal, cfg)
             number(rule.get("pick_z_mm"), "pick_z_mm")
@@ -344,6 +464,37 @@ def run_status(args, profile):
                 "note": "장비/물리 성공은 별도 확인. 기존 수치 제한은 설정 파일에 표시됩니다."})
 
 
+def run_wrist_preview(args, profile, cfg):
+    """Use the recorded grasp XY, not a camera target, for an offline check."""
+    from omx_tool_direction import pulse_to_q
+    require_job_arm(cfg, profile)
+    rule = get_rule(cfg, args.label)
+    reference = reference_for(cfg, args.label, profile)
+    saved = saved_for(profile, False)
+    fk = legacy("02_omx_xyz_offline.py", "pick_preview_fk")
+    xyz, _ = fk.forward(pulse_to_q(reference))
+    x, y = (xyz[:2] * 1000).tolist()
+    z = number(rule.get("pick_z_mm"), "pick_z_mm")
+    clearance = number(rule.get("hover_clearance_mm"), "hover_clearance_mm", 0)
+    extra = number(rule.get("approach_extra_mm"), "approach_extra_mm", 0)
+    solve = solver_for(reference, saved["hover_high"])
+    approach = solve((x, y, z + clearance + extra))
+    hover = solve((x, y, z + clearance))
+    contact = solve((x, y, z))
+    waypoints = [("HIGH", saved["hover_high"]), ("APPROACH", approach), ("HOVER", hover),
+                 ("PICK", contact), ("LIFT", hover), ("RETREAT", approach),
+                 ("CARRY_HIGH", saved["hover_high"]), ("DROP_APPROACH", saved["drop_approach"]),
+                 ("DROP_RELEASE", saved["drop_release"]), ("DROP_RETREAT", saved["drop_approach"]),
+                 ("RETURN_HIGH", saved["hover_high"])]
+    plan = dict(mode="WRIST_PREVIEW_NO_CAMERA_NO_MOTOR", class_name=args.label,
+                recorded_pick_xyz_mm=[x, y, z],
+                note="기록한 집기점의 모델 계산. 실제 YOLO 목표·도착·충돌은 미검증.",
+                stages=[dict(name=name, kind="arm", target=list(target)) for name, target in waypoints])
+    add_wrist_report(plan, reference)
+    print_json(plan)
+    write_output(args.output, plan)
+
+
 def run_torque_off(args, profile):
     from pick_robot import DynamixelBus, torque_off
     if input(f"팔·상품을 받친 뒤 {args.torque_scope} 토크 해제: OFF 입력: ").strip() != "OFF":
@@ -354,10 +505,49 @@ def run_torque_off(args, profile):
     return 0 if all(r["confirmed"] for r in results.values()) else 2
 
 
+def run_park(args, profile, parking):
+    """Return, close the gripper, and release torque; no camera/calibration."""
+    saved_cfg = read_json(args.config)
+    require_job_arm(saved_cfg, profile)
+    parking = parking_with_gripper(parking, saved_cfg)
+    plan = dict(mode="PARK_RETURN_AND_TORQUE_OFF", arm=profile.name,
+                serial_port=str(profile.port), parking=parking)
+    print_json(plan)
+    if not args.live:
+        write_output(args.output, {"mode": "DRY_RUN_NO_MOTOR_CONNECTION", "plan": plan})
+        return
+    from pick_robot import DynamixelBus, MotionController
+    cfg = dict(stage_seconds=parking["seconds"], stage_pause_seconds=0.1,
+               gripper=parking["gripper"], gripper_seconds=parking["gripper_seconds"])
+    with Journal(args.output) as journal, DynamixelBus(profile.port) as bus:
+        driver = MotionController(bus, cfg, journal.emit)
+        driver.prepare(use_gripper=True)
+        print_parking(parking)
+        if input("현재 위치부터 복귀 경로·받침을 확인하고 PARK 입력: ").strip() != "PARK":
+            journal.emit("cancelled", {})
+            return
+        journal.emit("plan", plan)
+        driver.prepare(use_gripper=True)
+        try:
+            driver.enable()
+        except BaseException:
+            driver.hold()
+            raise
+        try:
+            driver.park(parking)
+        except BaseException as exc:
+            journal.emit("failed", {"error": str(exc)})
+            raise
+        journal.emit("completed", {"arm_arrival": "CONFIRMED", "torque_off": "CONFIRMED"})
+        print("[DONE] 초기 자세 도착·그리퍼 닫힘·팔·그리퍼 토크 OFF 확인.")
+
+
 def run_drop_test(args, profile, cfg):
     require_job_arm(cfg, profile)
     saved = saved_for(profile, False)
     plan = build_drop_plan(cfg, saved, args.from_folded)
+    from omx_tool_direction import wrist_report
+    plan["wrist_path"] = wrist_report(legacy("02_omx_xyz_offline.py", "drop_wrist_fk"), plan["stages"])
     print_json(plan)
     if not args.live:
         write_output(args.output, {"mode": "DRY_RUN_NO_MOTOR_CONNECTION", "plan": plan})
@@ -389,6 +579,10 @@ def main(argv=None):
         write_output(args.output, result)
         return 0
     profile = profile_for(args.arm)
+    parking = parking_for(args, profile) if args.park or args.park_after else None
+    if args.park:
+        run_park(args, profile, parking)
+        return 0
     if args.torque_off:
         return run_torque_off(args, profile)
     if args.status:
@@ -407,12 +601,14 @@ def main(argv=None):
         if len(names) != 1 or names[0] == "REPLACE_WITH_EXACT_MODEL_CLASS_NAME":
             raise ValueError("설정 도구로 시험할 상품을 기록하세요. 여러 종류 설정은 --class로 선택하세요")
         args.label = names[0]
-    if args.drop_test:
+    if args.wrist_preview:
+        run_wrist_preview(args, profile, cfg)
+    elif args.drop_test:
         run_drop_test(args, profile, cfg)
     elif args.gripper_test:
         run_gripper_test(args, profile, cfg)
     else:
-        run_pipeline(args, profile, cfg)
+        run_pipeline(args, profile, cfg, parking)
     return 0
 
 

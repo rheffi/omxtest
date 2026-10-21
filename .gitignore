@@ -32,3 +32,14 @@
 .env.*
 *.pem
 *.key
+
+# Runtime behavior documentation.
+!/docs/omx_parking.md
+!/docs/omx_wrist_direction_fix.md
+
+# Portable offline tests and synthetic fixtures.
+!/tests/
+/tests/**
+!/tests/*.py
+!/tests/fixtures/
+!/tests/fixtures/*.json

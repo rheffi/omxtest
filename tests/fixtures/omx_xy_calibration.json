@@ -1,0 +1,62 @@
+{
+  "arm": "single",
+  "serial_port": "/dev/omx-test-only",
+  "method": "pixel_to_omx_model_xy_homography",
+  "camera": "/dev/omx-test-camera",
+  "width": 1920,
+  "height": 1080,
+  "robot_frame": "link0",
+  "robot_point": "end_effector_link",
+  "motor_zero_pulses_hypothesis": [
+    2048,
+    2048,
+    2048,
+    2048,
+    2048
+  ],
+  "motor_joint_signs_hypothesis": [
+    1,
+    1,
+    1,
+    1,
+    1
+  ],
+  "matrix_3x3": [
+    [
+      0,
+      0,
+      105.19205197836355
+    ],
+    [
+      0,
+      0,
+      96.09398598083348
+    ],
+    [
+      0,
+      0,
+      1
+    ]
+  ],
+  "regions_uv": [
+    [
+      [
+        0,
+        0
+      ],
+      [
+        1919,
+        0
+      ],
+      [
+        1919,
+        1079
+      ],
+      [
+        0,
+        1079
+      ]
+    ]
+  ],
+  "note": "SYNTHETIC TEST DATA ONLY; this constant map is not a physical calibration."
+}

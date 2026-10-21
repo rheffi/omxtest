@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "weights": "synthetic-test-only.pt",
+  "device": "cpu",
+  "imgsz": 640,
+  "confidence": 0.6,
+  "stage_seconds": 2.5,
+  "regions_uv": [
+    [
+      [
+        0,
+        0
+      ],
+      [
+        1919,
+        0
+      ],
+      [
+        1919,
+        1079
+      ],
+      [
+        0,
+        1079
+      ]
+    ]
+  ],
+  "gripper": {
+    "open_pulse": 2400,
+    "close_pulse": 2100,
+    "current_limit_raw": 100,
+    "settle_s": 0.1
+  },
+  "classes": {
+    "jin_ramen": {
+      "calibration_file": null,
+      "grasp_fraction": [
+        0.5,
+        0.5
+      ],
+      "xy_offset_mm": [
+        0,
+        0
+      ],
+      "pick_z_mm": 4.35134767368732,
+      "hover_clearance_mm": 50,
+      "approach_extra_mm": 40
+    }
+  },
+  "regions_source": "manual",
+  "unfold": {
+    "elbow_pulse": null,
+    "shoulder_pulse": null
+  },
+  "basket": {
+    "type": null,
+    "mount": "unspecified",
+    "shelf_to_basket_mm": 110,
+    "target_method": "saved_joint_poses",
+    "note": ""
+  },
+  "unfold_seconds": 3,
+  "gripper_seconds": 0.8,
+  "stage_pause_seconds": 0.1,
+  "serial_port": "/dev/omx-test-only",
+  "setup_measurements": {
+    "pick_arm_pulses": [
+      2504,
+      1918,
+      2570,
+      2681,
+      2341
+    ]
+  },
+  "note": "SYNTHETIC TEST DATA ONLY; never use this config with hardware."
+}

@@ -16,6 +16,7 @@ from pathlib import Path
 
 from omx_arm_config import (add_arm_argument, load_arm_profile,
                             require_explicit_arm, require_identity)
+from omx_wrist import canonical_wrist
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -135,6 +136,10 @@ def read_once(packet, port) -> dict:
         error_bits = sdk_read(packet, port, motor_id, 70, 1, "hardware error")
         goal = sdk_read(packet, port, motor_id, 116, 4, "goal")
         position = sdk_read(packet, port, motor_id, 132, 4, "present")
+        if motor_id == 15:
+            # Persist the equivalent single-turn pose; live transmission picks
+            # the nearest signed turn from the actual measured wrist position.
+            position = canonical_wrist(position)
         if mode != 4 or offset != 0 or error_bits != 0 or torque not in (0, 1):
             raise RuntimeError(f"ID {motor_id}: mode={mode}, offset={offset}, torque={torque}, error={error_bits}")
         if not 0 <= position <= 4095:

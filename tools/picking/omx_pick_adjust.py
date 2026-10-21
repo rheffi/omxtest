@@ -6,7 +6,8 @@ from datetime import datetime
 from pathlib import Path
 
 from pick_core import ROOT, build_plan, get_rule, load_config, number, pulses, to_xy, vector
-from omx_pick import calibration_for, profile_for, require_job_arm, saved_for, solver_for
+from omx_pick import (add_wrist_report, calibration_for, print_wrist_report,
+                      profile_for, reference_for, require_job_arm, saved_for, solver_for)
 from omx_pick_setup import atomic_record, read_snapshot
 from pick_robot import DynamixelBus, MotionController, torque_off
 from pick_vision import Camera, Detector, capture_target, show
@@ -95,8 +96,12 @@ def main(argv=None):
     print(f"선택 상품={target.label}, 영상 집기점={target.point(rule)}")
     print("화면의 박스와 십자가가 보정할 상품인지 확인하고 아무 키로 닫으세요.")
     show(frame, [target], target, cfg)
-    plan = approach_plan(cfg, calibration, target, saved_for(profile, True),
-                         solver_for(), args.hover_mm, args.from_folded)
+    saved = saved_for(profile, True)
+    reference = reference_for(cfg, label, profile)
+    plan = approach_plan(cfg, calibration, target, saved,
+                         solver_for(reference, saved["hover_high"]), args.hover_mm, args.from_folded)
+    add_wrist_report(plan, reference)
+    print_wrist_report(plan)
     print(f"집기 XYZ mm={plan['pick_model_xyz_mm']}, 낮은 호버 XYZ mm={plan['low_hover_xyz_mm']}")
     print("순서: " + " → ".join(s["name"] for s in plan["stages"]))
     print("그리퍼를 자동 개폐하거나 상품을 들어 올리지 않습니다.")

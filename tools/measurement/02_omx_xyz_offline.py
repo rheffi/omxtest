@@ -60,34 +60,41 @@ def forward(q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return p + r @ TOOL_XYZ, r
 
 
-def residual(q4: np.ndarray, target: np.ndarray, down: bool) -> np.ndarray:
-    q = np.r_[q4, 0.0]  # joint5 is tool-axis roll; leave it at zero offline.
+def residual(angles: np.ndarray, target: np.ndarray, down: bool,
+             tool_yaw_rad: float | None = None) -> np.ndarray:
+    q = np.r_[angles, 0.0] if tool_yaw_rad is None else angles
     position, orientation = forward(q)
     errors = [*(position - target)]
     if down:
         # The URDF tool's +X axis must point downward for a top approach.
         # Weight 1 radian of direction error as 0.1 m of position error.
         errors.extend(0.1 * (orientation[:, 0] - np.array([0.0, 0.0, -1.0])))
+    if tool_yaw_rad is not None:
+        # Fix the horizontal direction of the tool's +Y axis as well as +X down.
+        # Include roll in FK: TOOL_XYZ has a nonzero lateral offset.
+        heading = np.array([math.cos(tool_yaw_rad), math.sin(tool_yaw_rad), 0.0])
+        errors.extend(0.1 * (orientation[:, 1] - heading))
     return np.asarray(errors)
 
 
-def optimize(seed: np.ndarray, target: np.ndarray, down: bool) -> tuple[np.ndarray, float]:
-    """Damped numerical least squares on joint1..4; no actuator commands."""
+def optimize(seed: np.ndarray, target: np.ndarray, down: bool,
+             tool_yaw_rad: float | None = None) -> tuple[np.ndarray, float]:
+    """Damped numerical least squares; optional fifth axis fixes tool heading."""
     q = seed.copy()
     damping = 0.01
-    error = residual(q, target, down)
+    error = residual(q, target, down, tool_yaw_rad)
     cost = float(error @ error)
     for _ in range(180):
-        jacobian = np.empty((len(error), 4))
-        for col in range(4):
+        jacobian = np.empty((len(error), len(q)))
+        for col in range(len(q)):
             shifted = q.copy()
             shifted[col] += 1e-5
-            jacobian[:, col] = (residual(shifted, target, down) - error) / 1e-5
+            jacobian[:, col] = (residual(shifted, target, down, tool_yaw_rad) - error) / 1e-5
         step = np.linalg.solve(
-            jacobian.T @ jacobian + damping * np.eye(4), -jacobian.T @ error
+            jacobian.T @ jacobian + damping * np.eye(len(q)), -jacobian.T @ error
         )
         candidate = np.clip(q + step, JOINT_LOWER, JOINT_UPPER)
-        candidate_error = residual(candidate, target, down)
+        candidate_error = residual(candidate, target, down, tool_yaw_rad)
         candidate_cost = float(candidate_error @ candidate_error)
         if candidate_cost < cost:
             improvement = cost - candidate_cost
@@ -111,9 +118,14 @@ class Result:
     feasible: bool
 
 
-def solve(target: np.ndarray, down: bool) -> Result:
+def solve(target: np.ndarray, down: bool, *, tool_yaw_rad: float | None = None,
+          reference_q: np.ndarray | None = None) -> Result:
     if target.shape != (3,) or not np.all(np.isfinite(target)):
         raise ValueError("XYZ must contain three finite values in meters")
+    if tool_yaw_rad is not None and (not down or not math.isfinite(tool_yaw_rad)):
+        raise ValueError("Tool heading requires a finite yaw and a downward approach")
+    if reference_q is not None and (reference_q.shape != (5,) or not np.isfinite(reference_q).all()):
+        raise ValueError("reference_q must contain five finite joint angles")
     # Deterministic seeds cover both elbow configurations and yaw directions.
     seeds = [
         np.array([yaw, shoulder, elbow, wrist], dtype=float)
@@ -126,10 +138,19 @@ def solve(target: np.ndarray, down: bool) -> Result:
             (1.0, -1.7, 2.2),
         )
     ]
+    if tool_yaw_rad is not None:
+        seeds = [np.r_[s, (s[0] + math.pi / 2 - tool_yaw_rad + math.pi) % (2 * math.pi) - math.pi]
+                 for s in seeds]
+        if reference_q is not None:
+            seeds.insert(0, reference_q.copy())
     candidates = []
     for seed in seeds:
-        q4, _ = optimize(seed, target, down)
-        q = np.r_[q4, 0.0]
+        angles, _ = optimize(seed, target, down, tool_yaw_rad)
+        q = np.r_[angles, 0.0] if tool_yaw_rad is None else angles
+        if tool_yaw_rad is not None:
+            # Canonicalize before comparing actual absolute travel. Mode 4 does
+            # not interpret a 4095 -> 0 command as a short circular move.
+            q = (q + math.pi) % (2 * math.pi) - math.pi
         position, orientation = forward(q)
         position_error = float(np.linalg.norm(position - target))
         cosine = float(np.clip(orientation[:, 0] @ [0.0, 0.0, -1.0], -1.0, 1.0))
@@ -137,14 +158,27 @@ def solve(target: np.ndarray, down: bool) -> Result:
         feasible = position_error <= POSITION_TOLERANCE_M and (
             not down or down_error <= DOWN_TOLERANCE_DEG
         )
+        if tool_yaw_rad is not None:
+            heading = np.array([math.cos(tool_yaw_rad), math.sin(tool_yaw_rad), 0.0])
+            heading_error = math.degrees(math.acos(float(np.clip(orientation[:, 1] @ heading, -1, 1))))
+            feasible = feasible and heading_error <= 1.0
         candidates.append(Result(q, position, position_error, down_error, feasible))
-    # Among accurate solutions, prefer smaller joint travel from URDF zero.
-    # Numerical errors at the picometer scale must not select a full turn.
+    def travel(candidate):
+        delta = candidate.q.copy() if reference_q is None else candidate.q - reference_q
+        if reference_q is not None and tool_yaw_rad is not None:
+            # Only ID 15 uses nearest equivalent goals at transmission. The
+            # base/shoulder/elbow/pitch retain their absolute position branches.
+            delta[4] = math.atan2(math.sin(delta[4]), math.cos(delta[4]))
+        return delta
+
+    # Prefer accurate solutions near the preceding pose. Microscopic position
+    # error differences must not choose another elbow/base configuration.
     return min(candidates, key=lambda c: (
         not c.feasible,
+        bool(np.any(np.abs(travel(c)[:4]) >= math.pi)) if reference_q is not None else False,
         c.position_error_m > 0.0002,
         c.down_error_deg > 1.0 if down else False,
-        float(np.linalg.norm(c.q)),
+        float(np.linalg.norm(travel(c))),
         c.position_error_m,
     ))
 

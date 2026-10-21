@@ -231,9 +231,11 @@ def build_plan(cfg, calibration, detection, saved, solver, *, hover_only=False, 
         xyz = (*pick[:2], z)
         return pulses(solver(xyz))
 
-    hover = solve(pick[2] + clearance)
-    approach = solve(pick[2] + clearance + extra)
     high_pose = pulses(saved["hover_high"])
+    # Stateful direction-aware solvers choose the solution nearest the preceding
+    # pose. Solve in execution order, then reuse those exact poses on retreat.
+    approach = solve(pick[2] + clearance + extra)
+    hover = solve(pick[2] + clearance)
     stages = [Stage("HIGH", "arm", high_pose), Stage("APPROACH", "arm", approach),
               Stage("HOVER", "arm", hover)]
     if hover_only:
