@@ -149,7 +149,7 @@ def click_pixel(camera: str, width: int, height: int, fps: int) -> tuple[float, 
     if not cap.isOpened():
         raise RuntimeError(f"카메라를 열지 못했습니다: {camera}")
     window = "OMX cross: click center, Enter confirm, R recapture, Q cancel"
-    clicked: list[tuple[int, int]] = []
+    clicked: list[tuple[float, float]] = []
     try:
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -160,17 +160,27 @@ def click_pixel(camera: str, width: int, height: int, fps: int) -> tuple[float, 
             if not ok or frame is None:
                 raise RuntimeError("상단 카메라 영상을 읽지 못했습니다")
         cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE)
+        display_width, display_height = frame.shape[1], frame.shape[0]
 
         def on_mouse(event, x, y, _flags, _param):
-            if event == cv2.EVENT_LBUTTONDOWN:
-                clicked[:] = [(x, y)]
+            if (event == cv2.EVENT_LBUTTONDOWN
+                    and 0 <= x < display_width and 0 <= y < display_height):
+                clicked[:] = [(x * frame.shape[1] / display_width,
+                               y * frame.shape[0] / display_height)]
 
         cv2.setMouseCallback(window, on_mouse)
         print("고정된 화면에서 십자 중심 클릭 → Enter. R: 다시 촬영, Q/Esc: 취소")
         while True:
+            scale = min(1.0, 960 / frame.shape[1], 540 / frame.shape[0])
+            display_width = max(1, round(frame.shape[1] * scale))
+            display_height = max(1, round(frame.shape[0] * scale))
             view = frame.copy()
             if clicked:
-                cv2.drawMarker(view, clicked[0], (0, 0, 255), cv2.MARKER_CROSS, 22, 2)
+                point = tuple(round(value) for value in clicked[0])
+                cv2.drawMarker(view, point, (0, 0, 255), cv2.MARKER_CROSS, 22, 2)
+            if view.shape[1] != display_width or view.shape[0] != display_height:
+                view = cv2.resize(view, (display_width, display_height),
+                                  interpolation=cv2.INTER_AREA)
             cv2.imshow(window, view)
             key = cv2.waitKey(30) & 0xFF
             if key in (ord("q"), ord("Q"), 27):

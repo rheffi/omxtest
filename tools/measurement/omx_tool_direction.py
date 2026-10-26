@@ -54,6 +54,75 @@ def direction_solver(fk, reference_pulses, start_pulses=None):
     return solve
 
 
+def fixed_wrist_solver(fk, wrist_pulse, start_pulses):
+    """Solve XYZ/downward approach with ID 15 constant, including tool offset."""
+    previous = pulse_to_q(start_pulses)
+    fixed = list(start_pulses)
+    fixed[4] = wrist_pulse
+    fixed_angle = pulse_to_q(fixed)[4]
+
+    def solve(xyz_mm):
+        nonlocal previous
+        target = np.asarray(xyz_mm, dtype=float) / 1000
+        result = fk.solve(target, True, reference_q=previous, fixed_wrist_rad=fixed_angle)
+        if not result.feasible:
+            raise ValueError(f"고정 손목으로 도달할 수 없는 모델 XYZ: {xyz_mm}")
+        raw = np.rint(2048 + result.q * 4096 / (2 * math.pi)).astype(int)
+        raw[raw == 4096] = 0
+        values = [int(v) for v in raw]
+        values[4] = wrist_pulse
+        quantized = pulse_to_q(values)
+        if np.any(np.abs(quantized[:4] - previous[:4]) >= math.pi):
+            raise ValueError("고정 손목 경로의 팔 관절이 180도 이상 회전합니다")
+        position, orientation = fk.forward(quantized)
+        down_error = math.degrees(math.acos(float(np.clip(-orientation[2, 0], -1, 1))))
+        if np.linalg.norm(position - target) > 0.002 or down_error > 5:
+            raise ValueError("고정 손목 경로의 위치·아래 방향 오차가 허용 범위를 벗어났습니다")
+        previous = quantized
+        return values
+    return solve
+
+
+def height_only_pose(fk, reference_pulses, height_mm):
+    """Change only model Z, retaining the original XY, tool pitch and wrist."""
+    original = pulse_to_q(reference_pulses)
+    target, _ = fk.forward(original)
+    target[2] = float(height_mm) / 1000
+    pitch = float(sum(original[1:4]))
+
+    def residual(angles):
+        position, _ = fk.forward(np.r_[angles, original[4]])
+        return np.r_[position - target, .1 * (sum(angles[1:4]) - pitch)]
+
+    angles = original[:4].copy()
+    damping = 1e-8
+    for _ in range(100):
+        error = residual(angles)
+        if np.linalg.norm(error) < 1e-10:
+            break
+        jacobian = np.column_stack([
+            (residual(angles + np.eye(4)[i] * 1e-6) - error) / 1e-6
+            for i in range(4)])
+        step = np.linalg.solve(jacobian.T @ jacobian + damping * np.eye(4),
+                               -jacobian.T @ error)
+        candidate = angles + step
+        if np.linalg.norm(residual(candidate)) < np.linalg.norm(error):
+            angles = candidate
+            damping = max(1e-12, damping / 3)
+        else:
+            damping = min(1e3, damping * 10)
+    raw = np.rint(2048 + np.r_[angles, original[4]] * 4096 / (2 * math.pi)).astype(int)
+    raw[4] = reference_pulses[4]
+    values = [int(v) for v in raw]
+    quantized = pulse_to_q(values)
+    position, _ = fk.forward(quantized)
+    if (np.linalg.norm(position - target) > .002
+            or abs(sum(quantized[1:4]) - pitch) > math.radians(1)
+            or np.any(np.abs(quantized[:4] - original[:4]) >= math.pi)):
+        raise ValueError("기존 슬롯 XY·방향을 유지하는 놓기 높이를 계산할 수 없습니다")
+    return values
+
+
 def wrist_report(fk, stages):
     """Expose saved-pose transitions; never silently rewrite recorded poses."""
     report = []

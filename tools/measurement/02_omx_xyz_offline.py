@@ -61,8 +61,8 @@ def forward(q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def residual(angles: np.ndarray, target: np.ndarray, down: bool,
-             tool_yaw_rad: float | None = None) -> np.ndarray:
-    q = np.r_[angles, 0.0] if tool_yaw_rad is None else angles
+             tool_yaw_rad: float | None = None, fixed_wrist_rad: float = 0.0) -> np.ndarray:
+    q = np.r_[angles, fixed_wrist_rad] if tool_yaw_rad is None else angles
     position, orientation = forward(q)
     errors = [*(position - target)]
     if down:
@@ -78,23 +78,23 @@ def residual(angles: np.ndarray, target: np.ndarray, down: bool,
 
 
 def optimize(seed: np.ndarray, target: np.ndarray, down: bool,
-             tool_yaw_rad: float | None = None) -> tuple[np.ndarray, float]:
+             tool_yaw_rad: float | None = None, fixed_wrist_rad: float = 0.0) -> tuple[np.ndarray, float]:
     """Damped numerical least squares; optional fifth axis fixes tool heading."""
     q = seed.copy()
     damping = 0.01
-    error = residual(q, target, down, tool_yaw_rad)
+    error = residual(q, target, down, tool_yaw_rad, fixed_wrist_rad)
     cost = float(error @ error)
     for _ in range(180):
         jacobian = np.empty((len(error), len(q)))
         for col in range(len(q)):
             shifted = q.copy()
             shifted[col] += 1e-5
-            jacobian[:, col] = (residual(shifted, target, down, tool_yaw_rad) - error) / 1e-5
+            jacobian[:, col] = (residual(shifted, target, down, tool_yaw_rad, fixed_wrist_rad) - error) / 1e-5
         step = np.linalg.solve(
             jacobian.T @ jacobian + damping * np.eye(len(q)), -jacobian.T @ error
         )
         candidate = np.clip(q + step, JOINT_LOWER, JOINT_UPPER)
-        candidate_error = residual(candidate, target, down, tool_yaw_rad)
+        candidate_error = residual(candidate, target, down, tool_yaw_rad, fixed_wrist_rad)
         candidate_cost = float(candidate_error @ candidate_error)
         if candidate_cost < cost:
             improvement = cost - candidate_cost
@@ -119,13 +119,15 @@ class Result:
 
 
 def solve(target: np.ndarray, down: bool, *, tool_yaw_rad: float | None = None,
-          reference_q: np.ndarray | None = None) -> Result:
+          reference_q: np.ndarray | None = None, fixed_wrist_rad: float = 0.0) -> Result:
     if target.shape != (3,) or not np.all(np.isfinite(target)):
         raise ValueError("XYZ must contain three finite values in meters")
     if tool_yaw_rad is not None and (not down or not math.isfinite(tool_yaw_rad)):
         raise ValueError("Tool heading requires a finite yaw and a downward approach")
     if reference_q is not None and (reference_q.shape != (5,) or not np.isfinite(reference_q).all()):
         raise ValueError("reference_q must contain five finite joint angles")
+    if not math.isfinite(fixed_wrist_rad) or (tool_yaw_rad is not None and fixed_wrist_rad != 0):
+        raise ValueError("A finite fixed wrist cannot be combined with a world heading")
     # Deterministic seeds cover both elbow configurations and yaw directions.
     seeds = [
         np.array([yaw, shoulder, elbow, wrist], dtype=float)
@@ -143,11 +145,13 @@ def solve(target: np.ndarray, down: bool, *, tool_yaw_rad: float | None = None,
                  for s in seeds]
         if reference_q is not None:
             seeds.insert(0, reference_q.copy())
+    elif reference_q is not None:
+        seeds.insert(0, reference_q[:4].copy())
     candidates = []
     for seed in seeds:
-        angles, _ = optimize(seed, target, down, tool_yaw_rad)
-        q = np.r_[angles, 0.0] if tool_yaw_rad is None else angles
-        if tool_yaw_rad is not None:
+        angles, _ = optimize(seed, target, down, tool_yaw_rad, fixed_wrist_rad)
+        q = np.r_[angles, fixed_wrist_rad] if tool_yaw_rad is None else angles
+        if tool_yaw_rad is not None or fixed_wrist_rad != 0:
             # Canonicalize before comparing actual absolute travel. Mode 4 does
             # not interpret a 4095 -> 0 command as a short circular move.
             q = (q + math.pi) % (2 * math.pi) - math.pi

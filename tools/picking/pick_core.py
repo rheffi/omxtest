@@ -60,6 +60,8 @@ def load_config(path):
     cfg = read_json(path)
     if cfg.get("schema_version") != 1:
         raise ValueError("집기 설정 schema_version은 1이어야 합니다")
+    if cfg.get("wrist_policy", "recorded") not in ("recorded", "fixed"):
+        raise ValueError("wrist_policy는 recorded 또는 fixed여야 합니다")
     number(cfg.get("confidence"), "confidence", 0, 1)
     if number(cfg.get("stage_seconds"), "stage_seconds", 0) == 0:
         raise ValueError("stage_seconds는 양수여야 합니다")
@@ -172,6 +174,34 @@ def region_for(cfg, uv, width, height):
         raise ValueError("목표가 실제 선반 작업영역 밖입니다")
 
 
+def shelf_for(calibration, uv):
+    """The calibration records left then right; never infer sides from image X."""
+    regions = calibration.get("regions_uv")
+    if calibration.get("layout") != "two-shelves" or not isinstance(regions, list) or len(regions) != 2:
+        raise ValueError("좌우 보정에는 fit --layout two-shelves로 만든 선반 영역이 필요합니다")
+    matched = [side for side, region in zip(("left", "right"), regions)
+               if inside(uv, polygon(region, "regions_uv"))]
+    if len(matched) != 1:
+        raise ValueError("집기점의 좌우 선반을 하나로 구분할 수 없습니다")
+    return matched[0]
+
+
+def pick_point(cfg, calibration, detection, *, apply_shelf=True):
+    """Class-specific base target plus an optional shared shelf XYZ correction."""
+    rule = get_rule(cfg, detection.label)
+    uv = detection.point(rule)
+    xy = to_xy(calibration, uv)
+    offset = vector(rule.get("xy_offset_mm"), "xy_offset_mm", 2)
+    point = (xy[0] + offset[0], xy[1] + offset[1], number(rule.get("pick_z_mm"), "pick_z_mm"))
+    adjustments = cfg.get("shelf_adjustments")
+    if not apply_shelf or not adjustments:
+        return point
+    side = shelf_for(calibration, uv)
+    delta = vector(adjustments.get(side, {}).get("delta_xyz_mm", [0, 0, 0]),
+                   f"shelf_adjustments.{side}.delta_xyz_mm", 3)
+    return tuple(value + shift for value, shift in zip(point, delta))
+
+
 def choose(detections, cfg, label, width, height, index=0):
     rule = get_rule(cfg, label)
     candidates = []
@@ -215,15 +245,16 @@ def validate_gripper(cfg):
     return grip
 
 
-def build_plan(cfg, calibration, detection, saved, solver, *, hover_only=False, from_folded=False):
+def build_plan(cfg, calibration, detection, saved, solver, *, hover_only=False, from_folded=False,
+               final_pick_z_mm=None):
     """solver(XYZ mm) returns five joint pulses. No motor or file operations."""
     detection.validate(calibration["width"], calibration["height"])
     rule = get_rule(cfg, detection.label)
     uv = detection.point(rule)
     region_for(cfg, uv, calibration["width"], calibration["height"])
-    xy = to_xy(calibration, uv)
-    offset = vector(rule.get("xy_offset_mm"), "xy_offset_mm", 2)
-    pick = (xy[0] + offset[0], xy[1] + offset[1], number(rule.get("pick_z_mm"), "pick_z_mm"))
+    route_pick = pick_point(cfg, calibration, detection)
+    pick = route_pick if final_pick_z_mm is None else (
+        *route_pick[:2], number(final_pick_z_mm, "final_pick_z_mm"))
     clearance = number(rule.get("hover_clearance_mm"), "hover_clearance_mm", 0)
     extra = number(rule.get("approach_extra_mm"), "approach_extra_mm", 0)
 
@@ -234,8 +265,9 @@ def build_plan(cfg, calibration, detection, saved, solver, *, hover_only=False, 
     high_pose = pulses(saved["hover_high"])
     # Stateful direction-aware solvers choose the solution nearest the preceding
     # pose. Solve in execution order, then reuse those exact poses on retreat.
-    approach = solve(pick[2] + clearance + extra)
-    hover = solve(pick[2] + clearance)
+    approach = (pulses(saved["shelf_approach"]) if saved.get("shelf_approach") is not None
+                else solve(route_pick[2] + clearance + extra))
+    hover = solve(route_pick[2] + clearance)
     stages = [Stage("HIGH", "arm", high_pose), Stage("APPROACH", "arm", approach),
               Stage("HOVER", "arm", hover)]
     if hover_only:
