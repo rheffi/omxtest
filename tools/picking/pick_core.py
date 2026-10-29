@@ -209,10 +209,19 @@ def pick_point(cfg, calibration, detection, *, apply_shelf=True):
 
 def product_shelf_adjustment(rule, calibration, uv):
     """Extra XY and absolute contact Z for one product on one shelf."""
-    values = rule.get("pick_adjustments_by_shelf")
-    if not values:
+    values = rule.get("pick_adjustments_by_shelf") or {}
+    spatial = rule.get("spatial_adjustments_by_shelf") or {}
+    if not values and not spatial:
         return {}
-    return values.get(shelf_for(calibration, uv), {})
+    side = shelf_for(calibration, uv)
+    local = dict(values.get(side, {}))
+    if spatial.get(side):
+        from omx_spatial_correction import interpolate
+        dx, dy, z = interpolate(spatial[side], to_xy(calibration, uv))
+        extra = vector(local.get("xy_offset_mm", [0, 0]), "product shelf xy_offset_mm", 2)
+        local.update(xy_offset_mm=[extra[0] + dx, extra[1] + dy], pick_z_mm=z)
+    return local
+
 
 
 def choose(detections, cfg, label, width, height, index=0):
