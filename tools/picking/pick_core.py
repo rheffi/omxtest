@@ -193,13 +193,26 @@ def pick_point(cfg, calibration, detection, *, apply_shelf=True):
     xy = to_xy(calibration, uv)
     offset = vector(rule.get("xy_offset_mm"), "xy_offset_mm", 2)
     point = (xy[0] + offset[0], xy[1] + offset[1], number(rule.get("pick_z_mm"), "pick_z_mm"))
-    adjustments = cfg.get("shelf_adjustments")
-    if not apply_shelf or not adjustments:
+    if not apply_shelf:
         return point
-    side = shelf_for(calibration, uv)
-    delta = vector(adjustments.get(side, {}).get("delta_xyz_mm", [0, 0, 0]),
-                   f"shelf_adjustments.{side}.delta_xyz_mm", 3)
-    return tuple(value + shift for value, shift in zip(point, delta))
+    adjustments = cfg.get("shelf_adjustments")
+    if adjustments:
+        side = shelf_for(calibration, uv)
+        delta = vector(adjustments.get(side, {}).get("delta_xyz_mm", [0, 0, 0]),
+                       f"shelf_adjustments.{side}.delta_xyz_mm", 3)
+        point = tuple(value + shift for value, shift in zip(point, delta))
+    local = product_shelf_adjustment(rule, calibration, uv)
+    extra = vector(local.get("xy_offset_mm", [0, 0]), "product shelf xy_offset_mm", 2)
+    z = number(local["pick_z_mm"], "product shelf pick_z_mm") if "pick_z_mm" in local else point[2]
+    return point[0] + extra[0], point[1] + extra[1], z
+
+
+def product_shelf_adjustment(rule, calibration, uv):
+    """Extra XY and absolute contact Z for one product on one shelf."""
+    values = rule.get("pick_adjustments_by_shelf")
+    if not values:
+        return {}
+    return values.get(shelf_for(calibration, uv), {})
 
 
 def choose(detections, cfg, label, width, height, index=0):
@@ -246,7 +259,7 @@ def validate_gripper(cfg):
 
 
 def build_plan(cfg, calibration, detection, saved, solver, *, hover_only=False, from_folded=False,
-               final_pick_z_mm=None):
+               final_pick_z_mm=None, hover_stop_mm=None):
     """solver(XYZ mm) returns five joint pulses. No motor or file operations."""
     detection.validate(calibration["width"], calibration["height"])
     rule = get_rule(cfg, detection.label)
@@ -267,6 +280,17 @@ def build_plan(cfg, calibration, detection, saved, solver, *, hover_only=False, 
     # pose. Solve in execution order, then reuse those exact poses on retreat.
     approach = (pulses(saved["shelf_approach"]) if saved.get("shelf_approach") is not None
                 else solve(route_pick[2] + clearance + extra))
+    if hover_only and hover_stop_mm is not None:
+        low = (*pick[:2], pick[2] + number(hover_stop_mm, "hover_stop_mm", 0))
+        goal = pulses(solver(low))
+        grip = validate_gripper(cfg)
+        stages = unfold_stages(cfg, from_folded) + [
+            Stage("HIGH", "arm", high_pose), Stage("OPEN", "gripper", grip["open_pulse"]),
+            Stage("APPROACH", "arm", approach), Stage("LOW_HOVER", "arm", goal)]
+        return {"simulation": False, "class_name": detection.label, "confidence": detection.confidence,
+                "box_xyxy": detection.box, "uv": uv, "pick_model_xyz_mm": pick,
+                "hover_only": True, "hover_stop_mm": hover_stop_mm, "low_hover_xyz_mm": low,
+                "stages": [asdict(stage) for stage in stages]}
     hover = solve(route_pick[2] + clearance)
     stages = [Stage("HIGH", "arm", high_pose), Stage("APPROACH", "arm", approach),
               Stage("HOVER", "arm", hover)]

@@ -14,10 +14,12 @@ import time
 
 from pick_core import ARM_IDS, MODELS, pulses, validate_gripper
 from omx_wrist import canonical_wrist, nearest_wrist
+from omx_motor_frame import frame_packet, frame_metadata
 
 
 class DynamixelBus:
-    def __init__(self, path):
+    def __init__(self, path, *, frame_file=None):
+        self.frame_file = frame_file
         self.path = path
         self.port = None
 
@@ -34,7 +36,7 @@ class DynamixelBus:
         if check.returncode != 1:
             raise RuntimeError(f"직렬 포트 사용 중 또는 점유 확인 실패: {resolved}")
         from dynamixel_sdk import PacketHandler, PortHandler
-        self.packet = PacketHandler(2.0)
+        self.packet = frame_packet(PacketHandler(2.0), self.path, self.frame_file)
         self.port = PortHandler(str(resolved))
         try:
             if not self.port.openPort() or not self.port.setBaudRate(1_000_000):
@@ -87,6 +89,11 @@ def inspect(bus):
                      "voltage_v": bus.read(motor_id, 144, 2) / 10,
                      "current_limit_raw": bus.read(motor_id, 38, 2) if motor_id == 16 else None,
                      "goal_current_raw": bus.read(motor_id, 102, 2) if motor_id == 16 else None})
+    metadata = frame_metadata(bus.packet) if hasattr(bus, "packet") else None
+    if metadata:
+        row = next(row for row in rows if row["id"] == 14)
+        row["physical_position"] = metadata["physical_present_pulse"]
+        row["motor_frame"] = metadata
     return rows
 
 

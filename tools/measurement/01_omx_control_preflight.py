@@ -10,6 +10,8 @@ Run with the existing LeRobot environment:
 
 from __future__ import annotations
 
+from omx_motor_frame import frame_packet, frame_metadata
+
 import argparse
 import stat
 import subprocess
@@ -147,6 +149,9 @@ def inspect_motor(packet: PacketHandler, port: PortHandler, motor_id: int) -> bo
         f"torque={values['torque_enabled']} "
         f"position={position_text} pulse voltage={voltage_text}"
     )
+    if motor_id == 14 and frame_metadata(packet):
+        print(f"       ID14 model_position={position_text}; physical_position="
+              f"{frame_metadata(packet)['physical_present_pulse']}")
     minimum = values["min_voltage_limit"]
     maximum = values["max_voltage_limit"]
     limits = (
@@ -182,7 +187,7 @@ def main() -> int:
     print("PING/READ만 실행합니다. 모터 설정, 토크, 목표 위치는 변경하지 않습니다.")
 
     port = PortHandler(str(port_path))
-    packet = PacketHandler(PROTOCOL_VERSION)
+    packet = frame_packet(PacketHandler(PROTOCOL_VERSION), port_path)
     try:
         if not port.openPort():
             raise RuntimeError(f"직렬 포트를 열지 못했습니다: {port_path}")

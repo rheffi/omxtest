@@ -9,6 +9,8 @@ Run with /home/choi-chun-hwan/venv/il/bin/python -B.
 
 from __future__ import annotations
 
+from omx_motor_frame import frame_packet, frame_metadata
+
 import argparse
 import stat
 import subprocess
@@ -127,7 +129,7 @@ def main() -> int:
     path = check_port()
     print(f"port={PORT} -> {path}; execute={args.execute}")
     port = PortHandler(str(path))
-    packet = PacketHandler(2.0)
+    packet = frame_packet(PacketHandler(2.0), path)
     try:
         if not port.openPort():
             raise RuntimeError("직렬 포트를 열지 못했습니다")

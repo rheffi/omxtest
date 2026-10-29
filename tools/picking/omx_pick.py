@@ -191,10 +191,10 @@ def select_grasp_plan(reference, start, make_plan, *, wrist_policy="recorded",
 
 def build_pick_plan(cfg, calibration, target, saved, reference, *,
                     hover_only=False, from_folded=False, fixed_wrist_pulse=None,
-                    profile=None, drop_slot=None):
+                    profile=None, drop_slot=None, hover_stop_mm=None):
     rule = get_rule(cfg, target.label)
     height_poses = rule.get("pick_z_pose_by_shelf")
-    approach_poses = rule.get("approach_pose_by_shelf")
+    approach_poses = cfg.get("approach_pose_by_shelf") or rule.get("approach_pose_by_shelf")
     final_z = None
     if height_poses or approach_poses:
         if profile is None:
@@ -210,13 +210,18 @@ def build_pick_plan(cfg, calibration, target, saved, reference, *,
             recorded = recorder.load_pose(height_poses[side], profile)["raw_pulses"]
             fk = legacy("02_omx_xyz_offline.py", "recorded_contact_fk")
             final_z = float(fk.forward(pulse_to_q(recorded))[0][2] * 1000)
+    # A directly taught contact height takes precedence over older height poses.
+    from pick_core import product_shelf_adjustment
+    local = product_shelf_adjustment(rule, calibration, target.point(rule))
+    if "pick_z_mm" in local:
+        final_z = number(local["pick_z_mm"], "product shelf pick_z_mm")
     solver_start = saved.get("shelf_approach", saved["hover_high"])
     if fixed_wrist_pulse is None and cfg.get("wrist_policy") == "fixed":
         fixed_wrist_pulse = saved["hover_high"][4]
     return select_grasp_plan(reference, solver_start,
         lambda solve: build_plan(cfg, calibration, target, saved, solve,
                                 hover_only=hover_only, from_folded=from_folded,
-                                final_pick_z_mm=final_z),
+                                final_pick_z_mm=final_z, hover_stop_mm=hover_stop_mm),
         wrist_policy=cfg.get("wrist_policy", "recorded"),
         fixed_wrist_pulse=fixed_wrist_pulse)
 
@@ -302,14 +307,17 @@ def arguments(argv=None):
     source.add_argument("--inspect", action="store_true", help="모터 PING/READ와 후보 FK 출력")
     source.add_argument("--gripper-test", choices=("open", "close"), help="그리퍼만 단독 시험; --live 필요")
     parser.add_argument("--detect-only", action="store_true", help="보정 없이 검출 목록만 출력")
-    parser.add_argument("--hover", action="store_true", help="그리퍼/집기 없이 높은 호버와 복귀만")
-    parser.add_argument("--live", action="store_true", help="1회 실물 실행 (집기: MOVE, 초기 자세 복귀: PARK 확인)")
+    parser.add_argument("--hover", action="store_true", help="열린 그리퍼로 집기 직전까지 이동 후 토크 유지; --live는 MOVE 입력 없이 실행")
+    parser.add_argument("--hover-mm", type=float, default=5.0, help="--hover 정지점: 최종 집기 Z 위 간격 mm (기본 5)")
+    parser.add_argument("--live", action="store_true", help="1회 실물 실행 (호버: 즉시 실행, 집기: MOVE, 초기 자세 복귀: PARK 확인)")
     parser.add_argument("--stage-seconds", type=float, help="이번 실행의 일반 팔 이동 시간만 변경 (초)")
     parser.add_argument("--target-index", type=int, default=0, help="허용된 같은 클래스 검출을 신뢰도 순으로 선택 (0부터)")
     parser.add_argument("--show", action="store_true", help="검출 정지 화면 표시; 키 입력으로 닫기")
     parser.add_argument("--output", type=Path, help="새 JSON 출력 또는 --live JSONL 기록 경로 (덮어쓰기 금지)")
     args = parser.parse_args(argv)
     parking = args.park or args.park_after
+    if args.hover and args.park_after:
+        parser.error("--hover는 낮은 위치에서 유지합니다. --park-after와 함께 사용할 수 없습니다")
     if not math.isfinite(args.park_seconds) or not 1 <= args.park_seconds <= 60:
         parser.error("park-seconds는 1..60초입니다")
     if not 1 <= args.park_transit_tolerance <= 100:
@@ -461,7 +469,8 @@ def run_pipeline(args, profile, cfg, parking=None):
         reference = reference_for(cfg, target.label, profile)
         print("[PLAN] IK 계산 중. 모터에는 연결하지 않습니다.", flush=True)
         plan = build_pick_plan(cfg, calibration, target, saved, reference,
-                               hover_only=args.hover, from_folded=args.from_folded, profile=profile)
+                               hover_only=args.hover, from_folded=args.from_folded, profile=profile,
+                               hover_stop_mm=args.hover_mm if args.hover else None)
         add_wrist_report(plan, reference)
         plan.update(arm=profile.name, serial_port=str(profile.port), calibration_file=str(calibration_path),
                     calibration_check=calibration_report(calibration, cfg))
@@ -469,6 +478,8 @@ def run_pipeline(args, profile, cfg, parking=None):
             plan["parking"] = parking
         if args.live:
             print(f"[TARGET] {target.label}: XY={plan['pick_model_xyz_mm'][:2]}")
+            if args.hover:
+                print(f"[LOW HOVER] 열린 그리퍼로 XYZ={plan['low_hover_xyz_mm']}까지 이동 후 유지; MOVE 입력 없음", flush=True)
             print_wrist_report(plan)
             if parking is not None:
                 print_parking(parking)
@@ -484,17 +495,18 @@ def run_pipeline(args, profile, cfg, parking=None):
         bus = stack.enter_context(DynamixelBus(profile.port))
         driver = MotionController(bus, cfg, journal.emit)
         journal.emit("plan", {"plan": plan, "config": cfg})
-        driver.prepare(saved["hover_high"], use_gripper=not args.hover or parking is not None,
+        driver.prepare(saved["hover_high"], use_gripper=True,
                        from_folded=args.from_folded)
         if cfg.get("wrist_policy") == "fixed":
             from omx_wrist import canonical_wrist
             fixed = canonical_wrist(bus.read(15, 132, 4))
             plan = build_pick_plan(cfg, calibration, target, saved, reference,
                                   hover_only=args.hover, from_folded=args.from_folded,
-                                  fixed_wrist_pulse=fixed, profile=profile)
+                                  fixed_wrist_pulse=fixed, profile=profile,
+                                  hover_stop_mm=args.hover_mm if args.hover else None)
             add_wrist_report(plan, reference)
             journal.emit("live_fixed_wrist_plan", plan)
-        if input(f"{profile.name}: 주변과 경로를 확인하고 MOVE 입력: ").strip() != "MOVE":
+        if not args.hover and input(f"{profile.name}: 주변과 경로를 확인하고 MOVE 입력: ").strip() != "MOVE":
             journal.emit("cancelled", {})
             print("[CANCELLED] 모터 목표·토크를 변경하지 않았습니다.")
             return
@@ -513,7 +525,9 @@ def run_pipeline(args, profile, cfg, parking=None):
                     raise
                 driver.park(parking)
             journal.emit("completed", {"command_sequence": "SENT", "physical_success": "OPERATOR_VERIFY"})
-            if parking is not None:
+            if args.hover:
+                print("[HOVER HOLD] 낮은 시험점 목표 전송 종료. 열린 그리퍼와 팔 토크 유지. 실제 위치·손끝 간격을 확인하세요.")
+            elif parking is not None:
                 print("[DONE] 초기 자세 도착·그리퍼 닫힘·팔·그리퍼 토크 OFF 확인. 실제 적재 결과를 확인하세요.")
             else:
                 print("[DONE] 목표 전송 순서 종료. 실제 도착·집기·하역 결과를 확인하세요. 토크는 유지합니다.")

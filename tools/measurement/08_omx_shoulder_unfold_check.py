@@ -7,6 +7,8 @@ writes only ID 12 Goal Position. It never changes torque or motor settings.
 
 from __future__ import annotations
 
+from omx_motor_frame import frame_packet, frame_metadata
+
 import argparse
 import importlib.util
 import sys
@@ -65,7 +67,7 @@ def execute_step(hover, delta):
     from dynamixel_sdk import PacketHandler, PortHandler
     path = hover.check_port()
     port = PortHandler(str(path))
-    packet = PacketHandler(2.0)
+    packet = frame_packet(PacketHandler(2.0), path)
     goal_sent = False
     try:
         if not port.openPort() or not port.setBaudRate(1_000_000):

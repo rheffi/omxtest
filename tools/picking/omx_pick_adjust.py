@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""YOLO 접근 → 낮은 호버 정지 → OFF → 수동 실제 집기점 정렬 → 집기점 보정 저장."""
+"""집기점 보정 또는 --xy-record: 열린 낮은 호버 → WASD/RF XYZ 조절 → 기록만 저장."""
 import argparse
+import hashlib
+import json
+import math
+import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +16,131 @@ from omx_pick import (calibration_for, profile_for, reference_for, require_job_a
 from omx_pick_setup import atomic_record, read_snapshot
 from pick_robot import DynamixelBus, MotionController, torque_off
 from pick_vision import Camera, Detector, capture_target, show
+from omx_jog_keyboard import JogWindow
+
+
+def jog_goal(xyz, command, step_mm):
+    """Robot link0 single-axis increments; XY input leaves Z unchanged."""
+    moves = {"x+": (0, 1), "x-": (0, -1), "y+": (1, 1), "y-": (1, -1),
+             "z+": (2, 1), "z-": (2, -1)}
+    if command not in moves:
+        raise ValueError("지원하지 않는 XYZ 조절 방향입니다")
+    result = list(xyz)
+    axis, sign = moves[command]
+    result[axis] += sign * step_mm
+    return result
+
+
+def xy_snapshot(bus, fk):
+    from omx_tool_direction import pulse_to_q
+    from omx_wrist import canonical_wrist
+    raw = [bus.read(i, 132, 4) for i in range(11, 16)]
+    raw[4] = canonical_wrist(raw[4])
+    position, rotation = fk.forward(pulse_to_q(raw))
+    return dict(raw_pulses=raw, model_xyz_mm=(position * 1000).tolist(),
+                model_down_error_deg=math.degrees(math.acos(max(-1., min(1., -float(rotation[2, 0]))))))
+
+
+def jog_keyboard(driver, fk, wrist, xyz, goal, controls, speed):
+    """One small IK target per tick; no buffered repeat or catch-up movement."""
+    from omx_tool_direction import fixed_wrist_solver
+    from omx_wrist import nearest_wrist
+    automatic = None
+    z_adjusted = False
+    controls.activate()
+    controls.status(xyz)
+    next_send = 0.
+    while True:
+        command, revision = controls.poll()
+        if command == 'quit':
+            return None
+        if command == 'save':
+            if automatic is None:
+                automatic = xy_snapshot(driver.bus, fk)
+            return xyz, goal, automatic, z_adjusted
+        if command is None or time.monotonic() < next_send:
+            time.sleep(.01)
+            continue
+        if automatic is None:
+            automatic = xy_snapshot(driver.bus, fk)
+        candidate = jog_goal(xyz, command, speed * controls.keys.scale * .05)
+        try:
+            candidate_goal = list(pulses(fixed_wrist_solver(fk, wrist, goal)(candidate)))
+        except ValueError as exc:
+            controls.stop()
+            controls.status(xyz, str(exc))
+            continue
+        # Key-up/focus loss while IK was running must discard this unsent goal.
+        if controls.poll() != (command, revision):
+            continue
+        for index, motor_id in enumerate(range(11, 16)):
+            value = candidate_goal[index]
+            if motor_id == 15:
+                value = nearest_wrist(value, driver.bus.read(15, 132, 4))
+            driver.bus.write(motor_id, 116, 4, value)
+        xyz, goal = candidate, candidate_goal
+        z_adjusted = z_adjusted or command.startswith('z')
+        controls.status(xyz)
+        # Slow IK/serial reads never cause a later burst of queued movement.
+        next_send = time.monotonic() + .05
+
+
+def record_xy(args, cfg, calibration, target, profile, shelf):
+    """Open low hover -> held-key XYZ jog -> append one sample, no config writes."""
+    from omx_pick import build_pick_plan, legacy
+    from omx_wrist import canonical_wrist
+    if cfg.get("wrist_policy") != "fixed":
+        raise ValueError("XY 기록 모드는 wrist_policy=fixed 설정을 사용합니다")
+    saved = saved_for(profile, True)
+    reference = reference_for(cfg, target.label, profile)
+    fk = legacy("02_omx_xyz_offline.py", "xy_record_fk")
+    args.samples_file.parent.mkdir(parents=True, exist_ok=True)
+    speed = args.step_mm / args.jog_seconds
+    with JogWindow(speed) as controls, args.samples_file.open("a", encoding="utf-8") as stream, DynamixelBus(profile.port) as bus:
+        driver = MotionController(bus, cfg)
+        driver.prepare(use_gripper=True, from_folded=args.from_folded)
+        wrist = canonical_wrist(bus.read(15, 132, 4))
+        plan = build_pick_plan(cfg, calibration, target, saved, reference, hover_only=True,
+                              from_folded=args.from_folded, profile=profile,
+                              fixed_wrist_pulse=wrist, hover_stop_mm=args.hover_mm)
+        xyz = list(plan["low_hover_xyz_mm"])
+        original = list(xyz)
+        goal = list(plan["stages"][-1]["target"])
+        try:
+            print(f"[XY RECORD] {args.point_name}: XYZ={xyz}, ID15={wrist}; MOVE 입력 없이 이동합니다.", flush=True)
+            driver.enable()
+            for stage in plan["stages"]:
+                getattr(driver, stage["kind"])(stage["name"], stage["target"])
+            print("조절창에서 WASD: XY / R·F: Z. 누르는 동안 이동, 놓으면 추가 목표 전송 중단.")
+            print("Enter: 저장·종료 / Q·Esc: 취소 / Space: 정지. 토크는 유지합니다.")
+            result = jog_keyboard(driver, fk, wrist, xyz, goal, controls, speed)
+            if result is None:
+                print("[CANCELLED] 기록 없이 종료. 현재 목표·토크 유지.")
+                return 0
+            xyz, goal, automatic, z_adjusted = result
+            actual = xy_snapshot(bus, fk)
+            row = dict(recorded_at=datetime.now().astimezone().isoformat(),
+                               point_name=args.point_name, class_name=target.label, shelf=shelf,
+                               config_file=str(args.config.resolve()), serial_port=str(profile.port),
+                               camera=str(profile.camera), image_size=[calibration["width"], calibration["height"]],
+                               calibration_sha256=hashlib.sha256(json.dumps(calibration, sort_keys=True).encode()).hexdigest(),
+                               uv=list(plan["uv"]), box_xyxy=list(target.box),
+                               class_rule=get_rule(cfg, target.label),
+                               shelf_adjustment=cfg.get("shelf_adjustments", {}).get(shelf),
+                               pick_model_xyz_mm=list(plan["pick_model_xyz_mm"]),
+                               hover_mm=args.hover_mm, fixed_wrist_pulse=wrist,
+                               original_goal_xyz_mm=original, aligned_goal_xyz_mm=xyz,
+                               original_goal_pulses=list(plan["stages"][-1]["target"]),
+                               aligned_goal_pulses=goal, automatic_feedback=automatic,
+                               aligned_feedback=actual, physical_alignment="operator_confirmed",
+                               z_manually_adjusted=z_adjusted, z_delta_mm=xyz[2]-original[2])
+            stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+            stream.flush()
+            print(f"[SAVED] {args.samples_file}: {args.point_name}. 설정 변경 없음, 토크 유지.")
+            return 0
+        except BaseException:
+            driver.hold()
+            raise
 
 
 def corrected_config(cfg, calibration, target, actual_xyz, shelf=None):
@@ -84,7 +213,19 @@ def main(argv=None):
     parser.add_argument("--from-folded", action="store_true", help="접힌 출발: ID13 → ID12 → HIGH")
     parser.add_argument("--hover-mm", type=float, default=5, help="집기 Z 위 정지 높이 mm (기본 5)")
     parser.add_argument("--stage-seconds", type=float, help="이번 실행의 일반 팔 이동 시간 (초)")
+    parser.add_argument("--xy-record", action="store_true", help="수직·손목 고정 WASD/RF XYZ 조절 후 기록만 저장")
+    parser.add_argument("--point-name", help="XY 기록 위치 이름, 예: left_front")
+    parser.add_argument("--step-mm", type=float, default=10, help="조절 속도 분자 mm (step-mm / jog-seconds, 기본 10)")
+    parser.add_argument("--jog-seconds", type=float, default=0.4, help="조절 속도 분모 초 (기본 0.4, 즉 기본 25mm/s)")
+    parser.add_argument("--samples-file", type=Path, default=ROOT / "records/single/omx_xy_alignment_samples.jsonl")
     args = parser.parse_args(argv)
+    if args.xy_record:
+        if not args.point_name or not args.point_name.strip():
+            parser.error("--xy-record에는 --point-name이 필요합니다")
+        for name, value in (("step-mm", args.step_mm), ("jog-seconds", args.jog_seconds)):
+            if number(value, name, 0) == 0:
+                parser.error(f"{name}은 양수여야 합니다")
+        number(args.hover_mm, "hover-mm", 0)
     before = args.config.read_bytes()
     cfg = load_config(args.config)
     if args.stage_seconds is not None:
@@ -112,10 +253,14 @@ def main(argv=None):
     shelf = shelf_for(calibration, target.point(rule)) if calibration.get("layout") == "two-shelves" else None
     if args.shelf and shelf != args.shelf:
         raise ValueError(f"선택한 상품이 {args.shelf} 선반에 없습니다")
-    if shelf:
+    if shelf and not args.xy_record:
         print(f"보정 선반={shelf}; 이 선반의 상품에 공통으로 적용합니다.")
+    if args.xy_record:
+        print(f"기록 선반={shelf}; 화면을 닫으면 열린 그리퍼로 자동 이동합니다. 설정에는 반영하지 않습니다.")
     print("화면의 박스와 십자가가 보정할 상품인지 확인하고 아무 키로 닫으세요.")
     show(frame, [target], target, cfg)
+    if args.xy_record:
+        return record_xy(args, cfg, calibration, target, profile, shelf)
     saved = saved_for(profile, True)
     reference = reference_for(cfg, target.label, profile)
     plan = select_grasp_plan(reference, saved["hover_high"],

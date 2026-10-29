@@ -8,6 +8,8 @@ smooth joint-goal ramps through the requested stages. Arrival is not inferred.
 
 from __future__ import annotations
 
+from omx_motor_frame import frame_packet, frame_metadata
+
 import argparse
 import importlib.util
 import json
@@ -370,8 +372,9 @@ def internal_torque_off(profile=None):
         print("[CANCELLED] 직렬 포트를 열거나 모터값을 변경하지 않았습니다.")
         return 0
     from dynamixel_sdk import PacketHandler, PortHandler
-    port = PortHandler(str(check_port(profile)))
-    packet = PacketHandler(2.0)
+    path = check_port(profile)
+    port = PortHandler(str(path))
+    packet = frame_packet(PacketHandler(2.0), path)
     try:
         if not port.openPort() or not port.setBaudRate(1_000_000):
             raise RuntimeError("직렬 포트 또는 1000000 bps 설정에 실패했습니다")
@@ -469,7 +472,7 @@ def internal_motor(uv, pose_name, from_folded=False, stage_seconds=DEFAULT_STAGE
     plan = make_plan(data, tuple(uv), high)
     path = check_port(profile)
     port = PortHandler(str(path))
-    packet = PacketHandler(2.0)
+    packet = frame_packet(PacketHandler(2.0), path)
     try:
         if not port.openPort() or not port.setBaudRate(1_000_000):
             raise RuntimeError("직렬 포트 또는 1000000 bps 설정에 실패했습니다")
@@ -484,8 +487,9 @@ def internal_motor(uv, pose_name, from_folded=False, stage_seconds=DEFAULT_STAGE
 def internal_drop_motor(start_pose, approach_pose, hover_pose, stage_seconds, profile):
     plan = make_drop_plan(start_pose, approach_pose, hover_pose, profile)
     from dynamixel_sdk import PacketHandler, PortHandler
-    port = PortHandler(str(check_port(profile)))
-    packet = PacketHandler(2.0)
+    path = check_port(profile)
+    port = PortHandler(str(path))
+    packet = frame_packet(PacketHandler(2.0), path)
     try:
         if not port.openPort() or not port.setBaudRate(1_000_000):
             raise RuntimeError("직렬 포트 또는 1000000 bps 설정에 실패했습니다")

@@ -11,6 +11,8 @@ point is end_effector_link, not the measured midpoint between gripper fingers.
 
 from __future__ import annotations
 
+from omx_motor_frame import frame_packet, frame_metadata
+
 import argparse
 import importlib.util
 import json
@@ -78,7 +80,7 @@ def read_positions(path: Path, *, verbose: bool = True) -> list[int]:
     from dynamixel_sdk import COMM_SUCCESS, PacketHandler, PortHandler
 
     port = PortHandler(str(checked_port(path)))
-    packet = PacketHandler(2.0)
+    packet = frame_packet(PacketHandler(2.0), path)
     positions: list[int] = []
     try:
         if not port.openPort():

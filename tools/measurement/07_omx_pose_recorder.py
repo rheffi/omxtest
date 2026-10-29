@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from omx_motor_frame import frame_packet, frame_metadata
+
 import argparse
 import json
 import os
@@ -147,13 +149,17 @@ def read_once(packet, port) -> dict:
         positions.append(position)
         goals.append(goal)
         torques.append(torque)
-    return {"positions": positions, "goals": goals, "torque": torques[0] if len(set(torques)) == 1 else torques}
+    state = {"positions": positions, "goals": goals, "torque": torques[0] if len(set(torques)) == 1 else torques}
+    if frame_metadata(packet):
+        state["motor_frame"] = frame_metadata(packet)
+    return state
 
 
 def snapshot(profile=None) -> dict:
     from dynamixel_sdk import PacketHandler, PortHandler
-    port = PortHandler(str(check_port(profile)))
-    packet = PacketHandler(2.0)
+    path = check_port(profile)
+    port = PortHandler(str(path))
+    packet = frame_packet(PacketHandler(2.0), path)
     try:
         if not port.openPort() or not port.setBaudRate(1_000_000):
             raise RuntimeError("직렬 포트 또는 1000000 bps 설정에 실패했습니다")
@@ -187,6 +193,8 @@ def save_pose(name: str, replace: bool, profile=None) -> int:
         "operating_modes": [4] * 5, "homing_offsets": [0] * 5,
         "raw_pulses": state["positions"],
     }
+    if state.get("motor_frame"):
+        registry["poses"][name]["motor_frame"] = state["motor_frame"]
     atomic_save(registry, profile)
     print(f"[SAVED] {profile.poses if profile else POSES_FILE}: {name}")
     return 0
