@@ -3,14 +3,17 @@
 2026-10-29. **B 노트북의 그래픽 데스크톱 터미널**에서 실행한다.
 아래 팔 동작·토크 해제 명령은 준비 과정에서 실행하지 않았다.
 
-## 지금 할 일
+## 현재 결과와 다음 할 일
 
-- [ ] B OMX 전원·USB 연결. 준비 시점에는 모터 USB가 보이지 않았다.
-- [ ] B 카메라 구도를 고정하고 좌우 좌표 재캘리.
-- [ ] 낮은 집기 위치 확인 → 필요할 때 B에서 직접 보정 기록.
-- [ ] 필요한 선반·슬롯 자세만 재기록.
-- [ ] 진라면 → 라이스칩 → 신라면 3개 연속 적재.
-- [ ] 결과를 관제 세션에 전달한 뒤 관제 설정 연결·worker 기동.
+- [x] B 좌우 재캘리, 선반 공통 XY 및 라면 선반별 추가 XY·절대 집기 Z 반영.
+- [x] slot0/1/2_release 재기록. 선반·슬롯 접근 자세는 유지.
+- [x] 사용자 현장 보고: **3회 적재 적절히 성공**. 세 번째 상품(새우깡/치토스)과 단일 연속 실행 여부는 미확정. 신라면 실물 성공·새우깡 검출 해결로 확대 해석하지 않음.
+- [x] B 직접 실행과 주문 worker의 pick_config를 최신 시험 설정으로 연결.
+- [ ] Pinky 주행 → B 정밀주차 → 실제 적재를 관제에서 연결 시험.
+- [ ] 주문 기반 시험 시 서버·필요 worker 기동. C 하역은 준비 완료까지 보류.
+
+**아래 2~4절은 재작업이 필요할 때만 참고한다. 현재 새 캘리와 보정을 유지하며 ‘새 측정 시작·기존 XY 제거’를 다시 실행하지 않는다.**
+현재 모터 USB는 연결 확인했다. 실행 당일 점유·연결 상태는 달라질 수 있다.
 
 ## 1. 터미널 준비·연결 확인
 
@@ -24,11 +27,11 @@ py tools/picking/omx_pick.py --config config/omx_pick_xy_trial.json --status
 `py`는 현재 터미널에서만 유효하다. 새 터미널에서는 위 정의를 다시 실행한다.
 시험 설정은 **B의 기존 설정으로 만든** `config/omx_pick_xy_trial.json`이다.
 팔 이동·펼침은 6초, 그리퍼 시간은 기존 B 값을 유지한다.
-관제는 아직 기존 `config/omx_pick.json`을 사용한다. 로컬 시험 성공 후 확정 설정을 연결한다.
+관제 `gateway-b.hardware.json`과 주문용 `pinky-control-gateway-b.json` 모두 이 시험 설정을 읽도록 연결했다. 기존 `config/omx_pick.json`은 보존했으며 최신 시험과 보정값이 다르다.
 자세·캘리는 `config/single/omx_saved_poses.json`, `config/single/omx_xy_calibration.json`을 사용한다.
 A의 14번 +1024 보정 파일·자세·USB 설정은 B에 복사하지 않는다.
 
-## 2. 새 캘리 측정 시작 — 이 블록은 한 번만
+## 2. 새 캘리 측정 시작 — 완료, 현재 재실행하지 않음
 
 기존 측정점과 새 카메라 구도의 측정점을 섞지 않는다. 이 명령은 기존 자료를 보관하고 새 측정을 시작한다. 이미 새 측정을 시작했다면 반복하지 않는다.
 
@@ -141,7 +144,7 @@ py tools/measurement/07_omx_pose_recorder.py --save slot2_release --replace
 
 모두 다시 기록하라는 뜻은 아니다. 현재 문제가 있는 자세만 선택한다. 손목 정책은 fixed를 유지한다.
 
-## 5. 3개 연속 적재 — 보정 반영·자세 확인 후
+## 5. 3개 연속 적재 — 상품 선택 가능
 
 Pinky 바구니를 정밀주차 위치에 두고 실행한다. 아래는 **실제 집기·적재 명령**이다.
 
@@ -155,14 +158,22 @@ py tools/picking/omx_pick_three.py --config config/omx_pick_xy_trial.json --stag
 py tools/picking/omx_pick_three.py --config config/omx_pick_xy_trial.json --from-folded --stage-seconds 6 --live
 ```
 
-진라면→slot0, 라이스칩→slot1, 신라면→slot2. 상품마다 재인식하며 마지막 HIGH 복귀까지 목표를 전송한다. 출력의 SENT/END와 실제 성공은 구분한다.
+옵션 생략 시 진라면→slot0, 라이스칩→slot1, 신라면→slot2. 상품마다 재인식하며 마지막 HIGH 복귀까지 목표를 전송한다. 출력의 SENT/END와 실제 성공은 구분한다.
+
+현장에서 사용한 상품 선택 명령:
+
+```bash
+py tools/picking/omx_pick_three.py --config config/omx_pick_xy_trial.json --classes jin_ramen rice_chip shrimp_cracker --stage-seconds 6 --live
+```
+
+세 번째를 치토스로 바꾸려면 `--classes jin_ramen rice_chip cheetos`를 사용한다. 새우깡 검출 불안정이 해결됐다고 확정하지 않았다.
 
 ## 6. 관제로 넘길 결과
 
 - [ ] 사용한 설정·자세·캘리 파일 경로와 마지막 수정 시각.
 - [ ] 각 상품의 실제 집기·슬롯 적재 성공/실패 및 남은 문제.
 - [ ] 기록만 저장한 XY 조정값의 반영 여부.
-- [ ] 관제에 최종 시험 설정·6초 팔 이동을 연결하고 코드 반영 후 worker 기동.
+- [x] 관제에 최종 시험 설정·6초 팔 이동 연결. 실제 worker 기동·실물 연동 시험은 별도.
 - [ ] 관제를 통한 전체 시나리오 시험.
 
-현재 준비는 실물 성공이나 관제 전체 시험 완료를 뜻하지 않는다.
+로컬 실물 성공 보고와 관제 전체 시험 완료는 구분한다. C 하역은 아직 보류다.

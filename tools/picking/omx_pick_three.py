@@ -19,8 +19,11 @@ ITEMS = (("jin_ramen", 0), ("rice_chip", 1), ("shin_ramen", 2))
 
 
 def main():
-    parser = argparse.ArgumentParser(description="진라면→슬롯0, 라이스칩→슬롯1, 신라면→슬롯2. --live는 즉시 실행")
+    parser = argparse.ArgumentParser(description="상품 3개를 지정 순서대로 슬롯0/1/2에 적재. --live는 즉시 실행")
     parser.add_argument("--config", type=Path, default=ROOT / "config/omx_pick_xy_trial.json")
+    parser.add_argument("--classes", nargs=3, metavar=("SLOT0", "SLOT1", "SLOT2"),
+                        default=[label for label, _ in ITEMS],
+                        help="슬롯0/1/2 상품 클래스 (기본: jin_ramen rice_chip shin_ramen)")
     parser.add_argument("--from-folded", action="store_true", help="첫 상품 전에만 ID13→ID12→HIGH")
     parser.add_argument("--stage-seconds", type=float, default=6, help="팔 이동 구간당 시간; 기본 6초")
     parser.add_argument("--live", action="store_true", help="MOVE 입력 없이 3회 연속 실물 실행")
@@ -34,7 +37,7 @@ def main():
     recorder = legacy("07_omx_pose_recorder.py", "three_pose_recorder")
     poses = recorder.load_registry(profile)["poses"]
     jobs = []
-    for label, slot in ITEMS:
+    for slot, label in enumerate(args.classes):
         calibration, _ = calibration_for(profile, get_rule(cfg, label), cfg)
         job_cfg = dict(cfg, regions_uv=calibration["regions_uv"]) if cfg.get("regions_source") == "calibration" else cfg
         saved = {key: poses[name]["raw_pulses"] for key, name in {
@@ -42,7 +45,7 @@ def main():
             "drop_release": f"slot{slot}_release"}.items()}
         jobs.append((label, slot, job_cfg, calibration, saved, reference_for(cfg, label, profile)))
     print(f"config={args.config.resolve()}; live={args.live}", flush=True)
-    print("진라면 → 슬롯0 / 라이스칩 → 슬롯1 / 신라면 → 슬롯2", flush=True)
+    print(" / ".join(f"{label} → slot{slot}" for slot, label in enumerate(args.classes)), flush=True)
     detector = Detector(cfg)
     with ExitStack() as stack:
         camera = stack.enter_context(Camera(profile))
